@@ -1,0 +1,1360 @@
+---
+title: "R-INLA"
+author: "Jiho Kwak, 2020-17530"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# install.packages("showtext")
+library(showtext)
+
+# 한글 폰트 추가 (구글 Noto Sans KR)
+font_add_google("Noto Sans KR", "noto")
+showtext_auto()
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# TUTORIAL
+
+## Data Import
+
+```{r, message=FALSE}
+# install.packages("INLA", repos=c(getOption("repos"),
+#   INLA="https://inla.r-inla-download.org/R/stable"))
+# install.packages(c("data.table","dplyr","stringr","sf","spdep","Matrix"))
+
+library(INLA)
+library(data.table)
+library(dplyr)
+library(stringr)
+library(sf)
+library(spdep)
+library(Matrix)
+
+# 경로: 파일을 알맞게 지정하세요
+path <- "panel_full.csv"
+
+dt <- fread(path, encoding = "UTF-8")
+
+# 필수 열 확인
+stopifnot(all(c("canon_group_id","yyyymm","e9") %in% names(dt)))
+```
+
+```{r}
+# yyyymm → 시간 인덱스/Date
+dt <- dt %>%
+  mutate(
+    year  = as.integer(substr(yyyymm, 1, 4)),
+    month = as.integer(substr(yyyymm, 5, 6)),
+    date  = as.Date(paste0(year,"-",month,"-01"))
+  ) %>%
+  arrange(canon_group_id, date)
+
+# 결측/음수 e9 방지
+dt$e9[is.na(dt$e9)] <- 0
+dt$e9 <- as.integer(round(pmax(dt$e9, 0)))
+
+# 공간 ID와 시간 인덱스 생성
+dt <- dt %>%
+  mutate(
+    space_id = as.integer(factor(canon_group_id)),
+    time_id  = as.integer(factor(date))          # 등간격 월 인덱스
+  )
+
+# 2013년 3월
+dt <- dt %>%
+  mutate(
+    e9 = ifelse(year == 2013 & month == 3,
+                if (is.integer(e9)) as.integer(round(e9 / 2)) else e9 / 2,
+                e9)
+  )
+
+# 2013년 이후 & 분기 말 월(3,6,9,12)만 남기기
+dt_q <- dt %>%
+  filter(year >= 2013, month %in% c(3, 6, 9, 12), !(year == 2025 & month == 9)) %>%
+  arrange(canon_group_id, date)
+
+# 시간 인덱스를 분기 단위로 다시 생성 (빠짐없이 연속 수준이면 factor(date)로 충분)
+dt_q <- dt_q %>%
+  mutate(
+    time_id  = as.integer(factor(date)),   # 분기 시점만의 연속 인덱스
+    space_id = as.integer(factor(canon_group_id))
+  )
+
+n_space <- n_distinct(dt_q$space_id)
+n_time  <- n_distinct(dt_q$time_id)
+cat(sprintf("[분기 샘플링] 공간=%d, 분기 시점=%d\n", n_space, n_time))
+
+# offset/노출 정리(권장): population_total이 있으면 offset=log(pop+1)
+dt_q$e9[is.na(dt_q$e9)] <- 0L
+dt_q$log_pop_off <- log(pmax(dt_q$population_total %||% 0, 0) + 1)
+
+```
+
+## Merge Si's with General Gu
+```{r}
+## SGIS ver.
+
+library(sf)
+library(dplyr)
+library(stringr)
+
+# 1) 읽기
+sgg <- st_read("bnd_sigungu_00_2024_2Q/bnd_sigungu_00_2024_2Q.shp", quiet = TRUE)
+
+# 2) 좌표계: 라벨 없으면 set_crs, 있으면 transform (5186 고정)
+crs_now <- st_crs(sgg)
+if (is.na(crs_now)) {
+  sgg <- st_set_crs(sgg, 5186)
+} else if (is.na(crs_now$epsg) || crs_now$epsg != 5186) {
+  sgg <- st_transform(sgg, 5186)
+}
+sgg <- st_make_valid(sgg)
+
+
+# 이제 정확히 이 4열이 있어야 함
+# stopifnot(all(c("adzn_nm","sigungu_cd","sigungu_nm","geometry") %in% names(sgg)))
+
+# 4) 캐릭터 변환
+sgg <- sgg %>%
+  mutate(
+    SIGUNGU_CD = as.character(SIGUNGU_CD),
+    SIGUNGU_NM = as.character(SIGUNGU_NM)
+  )
+
+# 5) "XX시 ~~구"면 "XX시"로 병합, 코드는 끝자리 0으로
+is_city_gu <- grepl("시\\s*.+구$", sgg$SIGUNGU_NM)
+base_city  <- ifelse(is_city_gu,
+                     sub("^\\s*([^\\s]+?시)\\s+.*구\\s*$", "\\1", sgg$SIGUNGU_NM),
+                     sgg$SIGUNGU_NM)
+
+mk_code0 <- function(x){
+  x <- as.character(x); n <- nchar(x)
+  ifelse(n >= 1, paste0(substr(x, 1, n-1), "0"), x)
+}
+
+sgg2 <- sgg %>%
+  mutate(
+    new_sigungu_nm = base_city,
+    new_sigungu_cd = ifelse(is_city_gu, mk_code0(SIGUNGU_CD), SIGUNGU_CD)
+  )
+
+sgg_merged <- sgg2 %>%
+  group_by(new_sigungu_cd, new_sigungu_nm) %>%
+  summarise(SIGUNGU_NM = dplyr::first(SIGUNGU_NM), .groups="drop", do_union=TRUE) %>%
+  st_make_valid()
+
+cat("before =", nrow(sgg), " / after =", nrow(sgg_merged), "\n")
+
+dir.create("", showWarnings = FALSE)
+st_write(sgg_merged, "sgis_sgg_merged/SGG_merged.shp", delete_dsn = TRUE, quiet = TRUE)
+```
+
+```{r}
+st_write(
+  sgg_merged,
+  "sgis_sgg_merged/SGG_merged.gpkg",
+  delete_dsn = TRUE
+)
+
+```
+
+## SPM
+
+### Visualization of SPM
+```{r}
+library(sf)
+library(spdep)
+
+sgg <- sgg_merged 
+if (st_is_longlat(sgg)) sgg <- st_transform(sgg, 5179)
+
+
+
+# rook adjacency
+nb_geo <- poly2nb(sgg, queen=FALSE, snap=1e-3)
+
+# coords for kNN fallback
+coords <- st_coordinates(st_point_on_surface(sgg))
+knn1 <- knn2nb(knearneigh(coords, k=1))
+
+# combine
+nb_final <- union.nb(nb_geo, knn1)
+nb_final <- make.sym.nb(nb_final)
+
+lw <- nb2listw(nb_final, style="W", zero.policy=TRUE)
+
+print(n.comp.nb(nb_final)$nc)
+```
+
+```{r}
+library(sf)
+library(spdep)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+
+# -------------------------------------------------------
+# 0. sgg (sf) + lw(listw) 준비
+# -------------------------------------------------------
+# sgg <- sgg_merged  # 이미 준비된 sf
+# lw <- nb2listw(nb_final, style="B", zero.policy=TRUE)
+
+# 안전: 좌표계 변환
+if (st_is_longlat(sgg)) {
+  sgg <- st_transform(sgg, 5179)
+}
+
+# 인덱스 고정
+sgg <- sgg |>
+  arrange(new_sigungu_cd) |>
+  mutate(idx = row_number())
+
+# centroid
+cent <- st_point_on_surface(sgg)
+coords <- st_coordinates(cent)
+
+# -------------------------------------------------------
+# 1. lw(listw) → edge list 생성
+# -------------------------------------------------------
+
+nb <- lw$neighbours  # neighbour list
+n  <- length(nb)
+
+edge_df <- map2_dfr(
+  .x = seq_len(n),
+  .y = nb,
+  .f = ~{
+    if (!length(.y)) return(NULL)
+    tibble(from = .x, to = .y)
+  }
+) |> filter(from < to)
+
+# LINESTRING 생성
+line_list <- map(seq_len(nrow(edge_df)), function(k) {
+  i <- edge_df$from[k]
+  j <- edge_df$to[k]
+  st_linestring(rbind(coords[i,], coords[j,]))
+})
+
+skeleton <- st_sf(
+  edge_df,
+  geometry = st_sfc(line_list, crs = st_crs(sgg))
+)
+
+# -------------------------------------------------------
+# 2. 시각화
+# -------------------------------------------------------
+
+g <- ggplot() +
+  geom_sf(data = sgg, fill = NA, color = "grey40", linewidth = 0.3) +
+  geom_sf(data = skeleton, color = "steelblue", linewidth = 0.3, alpha = 0.7) +
+  geom_sf(data = cent, color = "red", size = 1.1) +
+  theme_void() +
+  coord_sf()
+
+print(g)
+
+# -------------------------------------------------------
+# 3. 고해상도 저장
+# -------------------------------------------------------
+ggsave("SGG_adj_from_lw.png", g,
+       width = 11, height = 11, dpi = 600)
+
+ggsave("SGG_adj_from_lw.pdf", g,
+       width = 11, height = 11)
+
+```
+
+### conversion to graph
+```{r}
+# install.packages(c("sf","spdep","Matrix"))
+library(sf)
+library(spdep)
+library(Matrix)
+
+# 희소행렬(dgCMatrix)로 추출
+W <- listw2mat(lw)        # base matrix
+W <- Matrix(W, sparse=TRUE)
+
+# 4) INLA 그래프 파일/객체 -----------------------------------------------------
+# INLA는 인접 리스트 파일(.adj) 또는 행렬에서 그래프를 읽을 수 있음
+# (버전 따라 행렬 직접 read가 안될 수 있어 안전하게 파일로 저장)
+INLA::inla.write.graph(as.matrix(W > 0), file = "sgg_graph.adj")
+G <- INLA::inla.read.graph("sgg_graph.adj")
+
+# 6) 출력 요약 ------------------------------------------------------------------
+cat("N =", nrow(sgg_merged),
+    "\nEdges =", sum(card(nb)),
+    "\nIslands after fix =", sum(card(nb) == 0),
+    "\nW dim =", paste(dim(W), collapse=" x "), "\n")
+
+# 7) ID 순서(중요) -------------------------------------------------------------
+# BYM2 등에 넣을 때, 모델 데이터의 공간 인덱스 순서가
+# sgg_merged의 row 순서(= nb/W 순서)와 일치해야 합니다.
+# 안전하게 키를 벡터로 저장해두세요:
+write.csv(data.frame(node_index = seq_len(nrow(sgg_merged)),
+                     sgg_code = sgg_merged[[id_col]]),
+          "sgg_graph_nodes.csv", row.names = FALSE, fileEncoding = "UTF-8")
+```
+
+
+## EDA
+```{r}
+dt_q %>% 
+  summarise(
+    n          = n(),
+    n_zero     = sum(e9 == 0),
+    prop_zero  = mean(e9 == 0),
+    mean_y     = mean(e9),
+    var_y      = var(e9),
+    max_y      = max(e9)
+  )
+
+ggplot(dt_q, aes(e9)) +
+  geom_histogram(bins = 50) +
+  scale_y_log10() +           # 꼬리 보기 좋게
+  labs(title = "Distribution of e9 counts (log y-scale)")
+```
+
+```{r}
+agg_time <- dt_q %>% 
+  group_by(time_id, tq_lab) %>%    # tq_lab: "2013Q1" 같은 라벨 있다고 가정
+  summarise(
+    y   = sum(e9),
+    pop = sum(population_total),
+    rate = y / pop,
+    log_rate = log(rate + 1e-9),
+    .groups = "drop"
+  )
+
+ggplot(agg_time, aes(x = time_id, y = log_rate)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = agg_time$time_id, labels = agg_time$tq_lab) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  labs(title = "Log incidence rate over time (aggregated)",
+       x = NULL, y = "log(rate)")
+
+
+```
+```{r}
+# 시작 연도/분기 세팅 (필요하면 바꿔줘)
+start_year  <- 2013
+start_quarter <- 1   # Q1
+
+ts_log_rate <- ts(
+  agg_time$log_rate,
+  start     = c(start_year, start_quarter),
+  frequency = 4       # 분기
+)
+
+decomp_stl <- stl(ts_log_rate, s.window = "periodic")  # 계절성 고정 가정
+
+plot(decomp_stl)
+
+library(tidyr)
+library(ggplot2)
+
+stl_df <- cbind(
+  time = as.numeric(time(ts_log_rate)),
+  as.data.frame(decomp_stl$time.series)
+)
+
+stl_df_long <- stl_df %>% 
+  pivot_longer(cols = -time, names_to = "component", values_to = "value")
+
+ggplot(stl_df_long, aes(x = time, y = value)) +
+  geom_line() +
+  facet_wrap(~ component, ncol = 1, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "STL decomposition of log(rate)",
+    x = "time", y = NULL
+  )
+
+# 예: 전체 합산 로그 rate
+ts_log_rate <- ts(agg_time$log_rate, frequency = 4)  # 분기 데이터라면 4
+
+par(mfrow = c(1,2))
+acf(ts_log_rate, main = "ACF of log rate")
+pacf(ts_log_rate, main = "PACF of log rate")
+par(mfrow = c(1,1))
+
+```
+```{r}
+plot(decompose(ts_log_rate))
+```
+```{r}
+library(tseries)
+acf(ts_log_rate); pacf(ts_log_rate); 
+adf.test(ts_log_rate, 
+         alternative = "stationary")
+```
+```{r}
+ts_diff <- diff(ts_log_rate)
+adf.test(ts_diff, 
+         alternative = "stationary")
+plot(ts_diff, type='l')
+```
+```{r}
+# 1) rate 계산
+dt_q <- dt_q %>% 
+  mutate(
+    rate     = e9 / population_total,
+    log_rate = log(rate + 1e-9)  # 0 방지용 작은 숫자
+  )
+dt_q <- dt_q %>%
+  mutate(new_sigungu_cd = as.character(sgg_code_sgis))
+
+sgg <- sgg %>%
+  mutate(new_sigungu_cd = as.character(new_sigungu_cd))
+
+# 2) 가장 최근 시점 선택
+last_time <- dt_q %>% summarise(last = max(time_id)) %>% pull(last)
+
+dt_last <- dt_q %>% filter(time_id == last_time)
+
+# 3) geometry join
+sgg_map <- sgg %>% 
+  left_join(dt_last, by = "new_sigungu_cd")
+
+ggplot(sgg_map) +
+  geom_sf(aes(fill = rate), color = "grey70", linewidth = 0.1) +
+  scale_fill_gradient(
+    name = "rate",
+    low  = "grey95",   # 낮은 값: 거의 흰색
+    high = "steelblue" # 높은 값: 진한 파랑
+  ) +
+  labs(
+    title = paste0("Crude rate of E9 (time_id = ", last_time, ")")
+  ) +
+  theme_minimal()
+
+# 5) log(rate) 지도 (범위 더 안정적)
+ggplot(sgg_map) +
+  geom_sf(aes(fill = log_rate), color = "grey70", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(
+    title = paste0("log(rate) of E9 (time_id = ", last_time, ")"),
+    fill  = "log(rate)"
+  ) +
+  theme_minimal()
+
+```
+```{r}
+# 가장 최근 시점만 예시로 사용 (원하면 루프 돌려도 됨)
+dt_last <- dt_q %>% filter(time_id == last_time)
+
+# 비공간 Poisson GLM (offset 포함, covariate는 필요에 따라 추가)
+m0 <- glm(
+  e9 ~ 1 + lnx + lnm,            # covariate 추가 (예시)
+  family = poisson,
+  offset = log_pop_off,
+  data   = dt_last
+)
+
+summary(m0)
+
+# Pearson residual
+dt_last$resid_pearson <- residuals(m0, type = "pearson")
+
+```
+```{r}
+sgg_resid <- sgg %>% 
+  left_join(dt_last %>% select(new_sigungu_cd, resid_pearson), 
+            by = "new_sigungu_cd") %>% 
+  filter(!is.na(resid_pearson))
+
+# 잔차 지도
+ggplot(sgg_resid) +
+  geom_sf(aes(fill = resid_pearson), color = "grey70", linewidth = 0.1) +
+  scale_fill_distiller(palette = "RdBu", direction = -1) +
+  labs(
+    title = paste0("Pearson residuals of non-spatial GLM (time_id = ", last_time, ")"),
+    fill  = "residual"
+  ) +
+  theme_minimal()
+
+# Moran's I of residuals
+mi_resid <- moran.test(
+  sgg_resid$resid_pearson,
+  listw = lw,
+  zero.policy = TRUE
+)
+
+mi_resid
+
+```
+
+```{r}
+## ===============================
+## 0) 패키지 & 기본 설정
+## ===============================
+# install.packages(c("dplyr","data.table","ggplot2","tidyr","stringr","forcats"))
+suppressPackageStartupMessages({
+  library(dplyr); library(data.table); library(ggplot2)
+  library(tidyr); library(stringr);  library(forcats)
+})
+
+# dt_q 가 메모리에 있다고 가정
+stopifnot(exists("dt_q"))
+
+## 키 컬럼 가정:
+## sgg_code10, year, month, date, e9, population_total
+req <- c("sgg_code10","year","month","date","e9","population_total")
+stopifnot(all(req %in% names(dt_q)))
+
+dt_q <- dt_q %>%
+  mutate(
+    sgg_code10 = as.character(sgg_code10),
+    year  = as.integer(year),
+    month = as.integer(month),
+    date  = as.Date(date)
+  ) %>%
+  arrange(sgg_code10, date)
+
+## 분기 라벨
+dt_q <- dt_q %>%
+  mutate(Q = ((month - 1L) %/% 3L) + 1L,
+         yq = paste0(year,"Q",Q))
+
+## ===============================
+## 1) 구조·결측·중복·일관성 점검
+## ===============================
+
+# 구조
+str(dt_q)
+
+# 결측 개요
+na_summary <- dt_q %>%
+  summarize(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to="var", values_to="n_na") %>%
+  arrange(desc(n_na))
+print(na_summary)
+
+# 키 중복 (sgg_code10 × date가 유일해야 함)
+dup_keys <- dt_q %>%
+  count(sgg_code10, date) %>%
+  filter(n > 1)
+cat("중복 키 행 수:", nrow(dup_keys), "\n")
+
+# 시간 연속성(분기 빠짐) 점검: 전체 타임라인 기준
+all_quarters <- dt_q %>%
+  distinct(date) %>% arrange(date) %>% pull(date)
+
+gap_check <- dt_q %>%
+  group_by(sgg_code10) %>%
+  summarize(
+    n_rows = n(),
+    n_expected = length(all_quarters),
+    n_missing = n_expected - n_rows,
+    .groups="drop"
+  ) %>%
+  arrange(desc(n_missing))
+print(head(gap_check, 10))
+
+# 논리 불일치: 인구=0인데 e9>0
+bad_rows <- dt_q %>% filter(coalesce(population_total,0) <= 0, e9 > 0)
+cat("인구=0 & e9>0 행 수:", nrow(bad_rows), "\n")
+
+## ===============================
+## 2) 요약 통계 & 제로-인플레이션
+## ===============================
+
+# 전체 분포
+summary(dt_q$e9)
+summary(dt_q$population_total)
+
+# 제로 비율
+prop_zero <- mean(coalesce(dt_q$e9,0) == 0)
+cat(sprintf("e9 = 0 비율: %.1f%%\n", 100*prop_zero))
+
+# 지역별 제로 비율 Top/Bottom
+zero_by_sgg <- dt_q %>%
+  group_by(sgg_code10) %>%
+  summarize(p_zero = mean(e9 == 0, na.rm=TRUE), n=n(), .groups="drop") %>%
+  arrange(desc(p_zero))
+head(zero_by_sgg, 10)
+tail(zero_by_sgg, 10)
+
+# 분기별 총합 추이
+ts_total <- dt_q %>%
+  group_by(yq, date) %>%
+  summarize(e9_total = sum(e9, na.rm=TRUE),
+            pop_total = sum(population_total, na.rm=TRUE),
+            .groups="drop")
+
+## ===============================
+## 3) 기본 시각화
+## ===============================
+
+# (a) e9 분포 히스토그램 (큰 값 꼬리 확인 위해 로그변환도)
+p1 <- ggplot(dt_q, aes(e9)) + 
+  geom_histogram(bins=50) + 
+  labs(title="e9 분포", x="e9", y="count")
+p2 <- ggplot(dt_q %>% mutate(e9_log1p = log1p(e9)),
+             aes(e9_log1p)) + 
+  geom_histogram(bins=50) + 
+  labs(title="log1p(e9) 분포", x="log1p(e9)", y="count")
+print(p1); print(p2)
+
+# (b) 분기별 총합 추이
+p3 <- ggplot(ts_total, aes(x=date, y=e9_total)) +
+  geom_line() + geom_point(size=0.6) +
+  labs(title="분기별 e9 총합 추이", x=NULL, y="sum(e9)")
+print(p3)
+
+# (c) 인구 대비 발생률(10만 명당)
+dt_q <- dt_q %>%
+  mutate(rate_100k = ifelse(population_total > 0, e9 / population_total * 1e5, NA_real_))
+
+ts_rate <- dt_q %>%
+  group_by(yq, date) %>%
+  summarize(rate_100k = sum(e9, na.rm=TRUE) / sum(population_total, na.rm=TRUE) * 1e5,
+            .groups="drop")
+
+p4 <- ggplot(ts_rate, aes(date, rate_100k)) +
+  geom_line() + geom_point(size=0.6) +
+  labs(title="분기별 10만 명당 발생률(전국)", x=NULL, y="rate per 100k")
+print(p4)
+
+# (d) 지역별 시계열 스파게티 (상위 몇 개만 보기: 인구 많은 10곳)
+top_pop <- dt_q %>% group_by(sgg_code10) %>%
+  summarize(pop_tot = sum(population_total, na.rm=TRUE), .groups="drop") %>%
+  arrange(desc(pop_tot)) %>% slice(1:10) %>% pull(sgg_code10)
+
+p5 <- dt_q %>%
+  filter(sgg_code10 %in% top_pop) %>%
+  ggplot(aes(date, rate_100k, group=sgg_code10, color=sgg_code10)) +
+  geom_line() + geom_point(size=0.5) +
+  labs(title="상위 10개 시군구: 10만 명당 발생률", x=NULL, y="rate per 100k") +
+  theme(legend.position="bottom")
+print(p5)
+
+## ===============================
+## 4) SIR(Observed/Expected) 기초
+## ===============================
+
+# 분기별 기준률 r_q = sum(e9)/sum(pop)
+rate_ref <- dt_q %>%
+  group_by(yq) %>%
+  summarize(r_q = sum(e9, na.rm=TRUE) / sum(population_total, na.rm=TRUE),
+            .groups="drop")
+
+dt_q <- dt_q %>%
+  left_join(rate_ref, by="yq") %>%
+  mutate(expected = r_q * population_total,
+         SIR = ifelse(expected > 0, e9 / expected, NA_real_))
+
+summary(dt_q$SIR)
+
+# 분기별 SIR 박스플롯 (전국 분산 확인)
+p6 <- dt_q %>%
+  ggplot(aes(x=fct_reorder(yq, as.numeric(date)), y=SIR)) +
+  geom_boxplot(outlier.size=0.6) +
+  labs(title="분기별 SIR 분포", x=NULL, y="SIR") +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+print(p6)
+
+# 지역별 평균 SIR 상위/하위
+sir_rank <- dt_q %>%
+  group_by(sgg_code10) %>%
+  summarize(SIR_mean = mean(SIR, na.rm=TRUE),
+            SIR_median = median(SIR, na.rm=TRUE),
+            .groups="drop") %>%
+  arrange(desc(SIR_mean))
+head(sir_rank, 10)
+tail(sir_rank, 10)
+
+## ===============================
+## 5) 공변량(있다면) 로그/스케일 & 상관
+## ===============================
+covars <- intersect(c("trade_export_val","trade_import_val","trade_balance"), names(dt_q))
+if (length(covars) > 0) {
+  dt_q <- dt_q %>%
+    mutate(
+      lnx = if ("trade_export_val" %in% names(.)) log1p(trade_export_val) else NA_real_,
+      lnm = if ("trade_import_val" %in% names(.)) log1p(trade_import_val) else NA_real_,
+      bal = if ("trade_balance"    %in% names(.)) trade_balance else NA_real_
+    )
+  # 상관(전국 평균 기준)
+  cov_df <- dt_q %>%
+    summarize(
+      cor_e9_lnx = suppressWarnings(cor(e9, lnx, use="pairwise")),
+      cor_e9_lnm = suppressWarnings(cor(e9, lnm, use="pairwise")),
+      cor_e9_bal = suppressWarnings(cor(e9, bal, use="pairwise")),
+      cor_rate_lnx = suppressWarnings(cor(rate_100k, lnx, use="pairwise")),
+      cor_rate_lnm = suppressWarnings(cor(rate_100k, lnm, use="pairwise")),
+      cor_rate_bal = suppressWarnings(cor(rate_100k, bal, use="pairwise"))
+    )
+  print(cov_df)
+}
+
+## ===============================
+## 6) 이상치·극단치 탐색
+## ===============================
+
+# e9 이상치 후보(상위 0.5%): 분기·지역 표시
+thr <- quantile(dt_q$e9, 0.995, na.rm=TRUE)
+out_e9 <- dt_q %>%
+  filter(e9 >= thr) %>%
+  arrange(desc(e9)) %>%
+  select(sgg_code10, yq, e9, population_total, rate_100k)
+print(out_e9)
+
+# SIR 극단치 (상위 1%)
+thr_sir <- quantile(dt_q$SIR, 0.99, na.rm=TRUE)
+out_sir <- dt_q %>%
+  filter(SIR >= thr_sir) %>%
+  arrange(desc(SIR)) %>%
+  select(sgg_code10, yq, e9, expected, SIR)
+print(out_sir)
+
+## ===============================
+## 7) (옵션) 공간 커버리지 맵 (sf가 있으면)
+## ===============================
+# sgg_merged (sf) 가 있고 코드열이 sgg_code10과 매치 가능하면:
+if (exists("sgg_merged") && inherits(sgg_merged, "sf")) {
+  code_col <- if ("new_sigungu_cd" %in% names(sgg_merged)) "new_sigungu_cd" else
+              if ("sigungu_cd"    %in% names(sgg_merged)) "sigungu_cd"    else
+              if ("signgu_cd"     %in% names(sgg_merged)) "signgu_cd"     else NA_character_
+  if (!is.na(code_col)) {
+    library(sf)
+    sgg_sf <- sgg_merged %>%
+      rename(sgg_code10 = !!code_col) %>%
+      mutate(sgg_code10 = as.character(sgg_code10))
+    # 최근 분기 하나 골라 SIR 혹은 rate 시각화
+    last_yq <- dt_q %>% arrange(date) %>% distinct(yq, date) %>% slice_tail(n=1) %>% pull(yq)
+    map_dt <- dt_q %>% filter(yq == last_yq) %>% select(sgg_code10, SIR, rate_100k)
+    map_sf <- sgg_sf %>% left_join(map_dt, by="sgg_code10")
+    p_map <- ggplot(map_sf) +
+      geom_sf(aes(fill = SIR), color="white", size=0.1) +
+      scale_fill_gradient2(low="#8274FF", mid="white", high="#FF6A4D",
+                           midpoint=1, na.value="grey90", name="SIR") +
+      labs(title=paste("SIR (", last_yq, ")", sep="")) +
+      theme_void()
+    print(p_map)
+  }
+}
+```
+
+```{r}
+library(sf); library(dplyr); library(ggplot2); library(rmapshaper)
+
+# 1) 분기 SIR 요약(속성만)
+sir_df <- dt_q %>%
+  mutate(Q = ((month - 1) %/% 3) + 1L, yq = paste0(year, "Q", Q)) %>%
+  group_by(sgg_code10, yq) %>%
+  summarise(SIR = mean(SIR, na.rm = TRUE), .groups = "drop")
+
+# 2) 단순화한 경계로 단 1번 조인
+sgg_simple <- rmapshaper::ms_simplify(sgg_sf, keep = 0.05, keep_shapes = TRUE)
+map_df <- sgg_simple %>% left_join(sir_df, by = "sgg_code10")
+
+# 3) 캡
+cap <- max(quantile(map_df$SIR, 0.99, na.rm = TRUE), 2, na.rm = TRUE)
+map_df$SIR_cap <- pmin(map_df$SIR, cap)
+
+# 4) 플롯(경계선 생략 + 좌표 계산 최소화)
+p <- ggplot(map_df) +
+  geom_sf(aes(fill = SIR_cap), color = NA) +
+  scale_fill_gradient2(
+    name = "SIR", low = "#8274FF", mid = "white", high = "#FF6A4D",
+    midpoint = 1, limits = c(0, cap), oob = scales::squish
+  ) +
+  coord_sf(datum = NA) +
+  facet_wrap(~ yq, ncol = 6) +
+  labs(title = "Quarterly SIR (Observed / Expected)") +
+  theme_void(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0))
+print(p)
+
+```
+
+
+## Test
+### RW1_null
+```{r}
+fit_baseline_q <- inla(
+  e9 ~ 1 + f(time_id, model = "rw1", scale.model = TRUE,
+             hyper = list(prec = list(prior = "pc.prec", param = c(1, 0.01)))),
+  data = dt_q,
+  family = "poisson",
+  E = dt_q$population_total,   # ← 여기!
+  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(link = 1, compute = TRUE),
+  control.inla      = list(strategy = "simplified.laplace",
+                           control.vb = list(emergency = 50))
+)
+
+summary(fit_baseline_q)
+
+```
+
+### RW1
+```{r}
+# 0) 공변량 생성 (음수/NA 방지)
+dt_q <- dt_q %>%
+  mutate(
+    lnx   = log1p(pmax(trade_export_val, 0)),
+    lnm   = log1p(pmax(trade_import_val, 0)),
+    balzs = as.numeric(scale(trade_balance))
+  )
+
+# 1) 노출량 E = 인구 (이미 있다면 생략)
+dt_q <- dt_q %>% mutate(E_pop = as.numeric(population_total))
+# 논리 불일치 정리(권장): E=0 & e9>0 제거
+dt_q <- dt_q %>% filter(!(E_pop <= 0 & e9 > 0))
+
+# 2) (중요) 공식(formula)을 명시적으로 따로 보관
+form_baseline_q <- e9 ~ 1 + 
+  f(time_id, model="rw1", scale.model=TRUE,
+    hyper=list(prec=list(prior="pc.prec", param=c(1,0.01))))
+
+# 3) 공변량 추가한 공식
+form_rw1cov_q <- update(form_baseline_q, . ~ . + lnx + lnm + balzs)
+
+# 4) 적합 (E= 방식; offset 쓰지 않음)
+fit_rw1cov_q <- inla(
+  formula = form_rw1cov_q,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+
+summary(fit_rw1cov_q)
+fit_rw1cov_q$waic$waic; fit_rw1cov_q$dic$dic
+```
+### AR1_null
+```{r}
+form_ar1 <- e9 ~ 1 +
+  f(time_id, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))     # AR(1) 상관 PC prior
+    )
+  )
+
+fit_ar1 <- inla(
+  formula = form_ar1,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+summary(fit_ar1)
+fit_ar1$waic$waic; fit_ar1$dic$dic
+```
+### AR1
+```{r}
+# 3) 공변량 추가한 공식
+form_ar1cov_q <- update(form_ar1, . ~ . + lnx + lnm + balzs)
+
+# 4) 적합 (E= 방식; offset 쓰지 않음)
+fit_ar1cov_q <- inla(
+  formula = form_ar1cov_q,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+
+summary(fit_ar1cov_q)
+fit_ar1cov_q$waic$waic; fit_ar1cov_q$dic$dic
+```
+
+
+### BYM2 + AR
+```{r}
+# 공간 인덱스 맞추기
+dt_q <- dt_q %>%
+  mutate(sgg_code_sgis = as.character(sgg_code_sgis)) %>%
+  left_join(
+    sgg %>%
+      st_drop_geometry() %>%              # geometry 빼고
+      transmute(
+        sgg_code_sgis    = new_sigungu_cd,  # dt_q의 키 이름으로 맞추기
+        idx
+      ),
+    by = "sgg_code_sgis"
+  ) %>%
+  arrange(time_id, idx) %>%
+  mutate(
+    space_id    = idx,
+    space_id_st = idx
+  )
+```
+
+```{r}
+# BYM2: 공간, 그래프=G
+# AR(1): 시간
+form_bym2_ar1 <- e9 ~ 1 +
+  f(space_id, model="bym2", graph=G,
+    scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),     # precision PC prior
+      phi  = list(prior="pc", param=c(0.5, 0.5))          # mixing parameter prior
+    )
+  ) +
+  f(time_id, model="ar1",
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))     # AR(1) 상관 PC prior
+    )
+  )
+
+fit_bym2_ar1 <- inla(
+  formula = form_bym2_ar1,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+summary(fit_bym2_ar1)
+fit_bym2_ar1$waic$waic; fit_bym2_ar1$dic$dic
+
+```
+
+### BYM2 * AR (time-varying spatial random effects)
+```{r}
+# 공간 ID를 시간별로 복제한 인덱스(상호작용용)
+dt_q <- dt_q %>% arrange(time_id, space_id)
+dt_q$space_id_st <- dt_q$space_id          # 동일 값이지만 group=time_id로 복제될 것
+
+form_interaction <- e9 ~ 1 +
+  # # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
+  # f(space_id, model="bym2", graph=G, scale.model=TRUE,
+  #   hyper = list(
+  #     prec = list(prior="pc.prec", param=c(1, 0.01)),
+  #     phi  = list(prior="pc", param=c(0.5, 0.5))
+  #   )) +
+  # 메인 시간효과
+  f(time_id, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    )) +
+  # 공간×시간 상호작용: BYM2를 시간별 복제, 시간 간 AR(1)로 연결
+  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+    group = time_id,
+    control.group = list(model="ar1",
+                         hyper = list(
+                           theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+                           rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+                         )),
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )
+  )
+
+fit_interaction <- inla(
+  formula = form_interaction,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+summary(fit_interaction)
+fit_interaction$waic$waic; fit_interaction$dic$dic
+
+```
+
+### BYM2 * AR + cov
+```{r}
+dt_q <- dt_q %>%
+  mutate(
+    lnx   = log1p(pmax(trade_export_val, 0)),
+    lnm   = log1p(pmax(trade_import_val, 0)),
+    balzs = as.numeric(scale(trade_balance))
+  )
+
+# 3) 공변량 추가한 공식
+form_cov_q <- update(form_interaction, . ~ . + lnx + lnm)
+
+# 4) 적합 (E= 방식; offset 쓰지 않음)
+fit_cov_q <- inla(
+  formula = form_cov_q,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+summary(fit_cov_q)
+fit_cov_q$waic$waic; fit_cov_q$dic$dic
+```
+
+### BYM2 * AR after Spatial +
+
+```{r}
+# 패키지 로드 -------------------------------------------------------------
+library(INLA)
+library(dplyr)
+
+# 0. 데이터 전처리: 정렬 + 공변량 생성 -----------------------------------
+# dt_q: 시공간 패널 (열: e9, E_pop, trade_export_val, trade_import_val, time_id, space_id 등)
+
+dt_q <- dt_q %>%
+  arrange(time_id, space_id) %>%
+  mutate(
+    # 시공간 상호작용용 공간 인덱스 (time_id로 group 복제)
+    space_id_st = space_id,
+    # 무역 공변량 (원본)
+    lnx   = log1p(pmax(trade_export_val, 0)),   # export
+    lnm   = log1p(pmax(trade_import_val, 0)),   # import
+    balzs = as.numeric(scale(trade_balance))    # 필요하면 나중에 사용
+  )
+
+# (선택) NA 제거가 필요하면 여기서 처리:
+# dt_q <- dt_q %>% filter(!is.na(lnx), !is.na(lnm))
+
+
+# 1. Spatial+용 보조 모형: lnx ~ BYM2 × AR(1) (Gaussian) -----------------
+form_lnx_spplus <- lnx ~ 1 +
+  # 시간 AR(1)
+  f(time_id, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    )) +
+  # 공간×시간 BYM2 * AR(1)
+  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+    group = time_id,
+    control.group = list(
+      model="ar1",
+      hyper = list(
+        theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+        rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+      )
+    ),
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )
+  )
+
+fit_lnx_spplus <- inla(
+  formula = form_lnx_spplus,
+  data    = dt_q,
+  family  = "gaussian",
+  control.compute = list(config = TRUE),
+  control.inla = list(strategy = "simplified.laplace",
+                      control.vb = list(emergency = 50))
+)
+
+# Spatial+용 공변량: lnx에서 시공간 패턴(fitted)을 제거 -------------------
+dt_q$lnx_fit  <- fit_lnx_spplus$summary.fitted.values[, "mean"]
+dt_q$lnx_sppl <- dt_q$lnx - dt_q$lnx_fit
+dt_q$lnx_sppl <- as.numeric(scale(dt_q$lnx_sppl))   # 스케일링 (선택)
+
+
+# 2. Spatial+용 보조 모형: lnm ~ BYM2 × AR(1) (Gaussian) -----------------
+form_lnm_spplus <- lnm ~ 1 +
+  f(time_id, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    )) +
+  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+    group = time_id,
+    control.group = list(
+      model="ar1",
+      hyper = list(
+        theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+        rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+      )
+    ),
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )
+  )
+
+fit_lnm_spplus <- inla(
+  formula = form_lnm_spplus,
+  data    = dt_q,
+  family  = "gaussian",
+  control.compute = list(config = TRUE),
+  control.inla = list(strategy = "simplified.laplace",
+                      control.vb = list(emergency = 50))
+)
+
+# Spatial+용 공변량: lnm에서 시공간 패턴(fitted)을 제거 -------------------
+dt_q$lnm_fit  <- fit_lnm_spplus$summary.fitted.values[, "mean"]
+dt_q$lnm_sppl <- dt_q$lnm - dt_q$lnm_fit
+dt_q$lnm_sppl <- as.numeric(scale(dt_q$lnm_sppl))   # 스케일링 (선택)
+
+
+# 3. 원래 BYM2 × AR(1) E9 모형 (공변량 없이) ------------------------------
+form_interaction <- e9 ~ 1 +
+  # (선택) 메인 공간효과: 필요시 주석 해제
+  # f(space_id, model="bym2", graph=G, scale.model=TRUE,
+  #   hyper = list(
+  #     prec = list(prior="pc.prec", param=c(1, 0.01)),
+  #     phi  = list(prior="pc", param=c(0.5, 0.5))
+  #   )) +
+  # 시간 AR(1)
+  f(time_id, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    )) +
+  # 공간×시간 상호작용 BYM2 * AR(1)
+  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+    group = time_id,
+    control.group = list(
+      model="ar1",
+      hyper = list(
+        theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+        rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+      )
+    ),
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )
+  )
+
+fit_interaction <- inla(
+  formula = form_interaction,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,   # 기대노출(인구)
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+fit_interaction$waic$waic
+fit_interaction$dic$dic
+summary(fit_interaction)
+
+
+# 4. Spatial+ 공변량을 넣은 최종 E9 모형 -------------------------------
+# 원래 form_interaction에 lnx, lnm 대신 lnx_sppl, lnm_sppl 추가
+form_cov_q_sppl <- update(
+  form_interaction,
+  . ~ . + lnx_sppl + lnm_sppl
+)
+
+fit_cov_q_sppl <- inla(
+  formula = form_cov_q_sppl,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+fit_cov_q_sppl$waic$waic
+fit_cov_q_sppl$dic$dic
+summary(fit_cov_q_sppl)
+
+# (선택) 원래 공변량 버전과 비교하고 싶으면:
+# form_cov_q <- update(form_interaction, . ~ . + lnx + lnm)
+# fit_cov_q  <- inla(... 동일 옵션 ...)
+# 그리고 fit_cov_q vs fit_cov_q_sppl의 β, WAIC, DIC 비교
+
+```
+### BYM2 * RW
+```{r}
+# 공간 ID를 시간별로 복제한 인덱스(상호작용용)
+dt_q <- dt_q %>% arrange(time_id, space_id)
+dt_q$space_id_st <- dt_q$space_id          # 동일 값이지만 group=time_id로 복제될 것
+
+form_interaction_rw <- e9 ~ 1 +
+  # # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
+  # f(space_id, model="bym2", graph=G, scale.model=TRUE,
+  #   hyper = list(
+  #     prec = list(prior="pc.prec", param=c(1, 0.01)),
+  #     phi  = list(prior="pc", param=c(0.5, 0.5))
+  #   )) +
+  # 메인 시간효과
+  f(time_id, model="rw1",
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      )) +
+  # 공간×시간 상호작용: BYM2를 시간별 복제, 시간 간 RW(1)로 연결
+  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+    group = time_id,
+    control.group = list(model="rw1",
+                         hyper = list(
+                           prec = list(prior="pc.prec", param=c(1, 0.01)),
+                         )),
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+    )
+  )
+
+fit_interaction_rw <- inla(
+  formula = form_interaction_rw,
+  data    = dt_q,
+  family  = "poisson",
+  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+summary(fit_interaction_rw)
+fit_interaction_rw$waic$waic; fit_interaction_rw$dic$dic
+
+```
+
+### Model Comparison
+```{r}
+data.frame(
+  model = c("baseline_rw1", "baseline_ar1", "rw1+cov", "bym2_ar1","interaction","bym2_ar1+cov"),
+  WAIC  = c(fit_baseline_q$waic$waic,
+            fit_ar1$waic$waic,
+            fit_rw1cov_q$waic$waic,
+            fit_bym2_ar1$waic$waic,
+            fit_interaction$waic$waic,
+            fit_cov_q$waic$waic),
+  DIC   = c(fit_baseline_q$dic$dic,
+            fit_ar1$dic$dic,
+            fit_rw1cov_q$dic$dic,
+            fit_bym2_ar1$dic$dic,
+            fit_interaction$dic$dic,
+            fit_cov_q$dic$dic)
+)
+
+# PIT/요약
+hist(fit_bym2_ar1$cpo$pit, breaks=30, main="PIT (BYM2+AR1)")
+```
+
+## Result
+```{r}
+library(dplyr)
+library(sf)
+library(ggplot2)
+
+# 1) RR = exp(eta)
+# INLA에서 E= 사용하면 predictor(eta)는 log(RR) 이므로 exp(eta)가 RR
+dt_q$RR_mean <- exp(fit_cov_q_sppl$summary.fitted.values[, "mean"])
+
+# 2) time_id -> 연/분기 라벨 (2013Q1부터 시작한다고 가정)
+dt_q <- dt_q %>%
+  mutate(
+    year    = 2013 + (time_id - 1) %/% 4,
+    quarter = (time_id - 1) %% 4 + 1,
+    tq_lab  = factor(sprintf("%dQ%d", year, quarter),
+                     levels = unique(sprintf("%dQ%d", year, quarter)))  # 정렬 유지
+  )
+
+sgg_panel <- sgg %>%
+  left_join(
+    dt_q %>%
+      select(space_id, time_id, year, tq_lab, RR_mean),
+    by = c("idx" = "space_id")   # ★ 여기서 idx ↔ space_id 매칭
+  )
+
+# 연도 평균 RR
+sgg_year <- sgg_panel %>%
+  st_drop_geometry() %>%
+  group_by(idx, year) %>%                             # ★ idx 기준으로 연도 평균
+  summarise(RR_year = mean(RR_mean, na.rm = TRUE), .groups = "drop") %>%
+  left_join(
+    sgg,
+    by = "idx"
+  ) %>%
+  st_as_sf()
+```
+
+
+```{r}
+library(scales)
+
+## 1. RR 범위 / 대칭 스케일 만들기 ---------------------------------------
+rr_range <- range(sgg_year$RR_year, na.rm = TRUE)
+max_dev  <- max(abs(rr_range - 1))
+lims     <- 1 + c(-max_dev, max_dev)   # 1을 기준으로 좌우 대칭
+
+## 2. Moraga 스타일 연도별 RR 맵 -----------------------------------------
+p_rr_year <- ggplot(sgg_year) +
+  geom_sf(aes(fill = RR_year),
+          colour = "grey60", linewidth = 0.15) +
+  facet_wrap(~ year, ncol = 4) +
+  scale_fill_gradient2(
+    name = "RR",
+    low  = "#5e3c99",   # 보라
+    mid  = "white",
+    high = "#e66101",   # 주황/빨강
+    midpoint = 1,
+    limits   = lims,
+    oob      = squish
+  ) +
+  coord_sf(datum = NA) +
+  labs(title = "E-9 Relative Risk by SGG, yearly mean") +
+  theme_void(base_size = 11) +
+  theme(
+    # 패널 테두리 + 스트립 (Moraga 느낌)
+    panel.border     = element_rect(colour = "grey50", fill = NA, linewidth = 0.3),
+    strip.background = element_rect(fill = "grey85", colour = "grey40", linewidth = 0.4),
+    strip.text       = element_text(face = "bold", size = 11),
+
+    # 패널 간격 / 여백
+    panel.spacing = unit(0.4, "lines"),
+    plot.margin   = margin(t = 10, r = 20, b = 10, l = 10),
+
+    # 제목 / 범례
+    plot.title      = element_text(size = 18, face = "bold", hjust = 0, margin = margin(b = 10)),
+    legend.title    = element_text(size = 11),
+    legend.text     = element_text(size = 10),
+    legend.key.height = unit(1.4, "lines"),
+    legend.key.width  = unit(0.6, "lines")
+  )
+
+p_rr_year
+
+```
+```{r}
+out_dir <- "/Users/kjh/Documents/geostat3_e9/plots"
+dir.create(out_dir, showWarnings = FALSE)
+
+ggsave(
+  filename = file.path(out_dir, "e9_rr_yearly_mean.png"),
+  plot     = p_rr_year,
+  width    = 9,     # inch
+  height   = 6,
+  dpi      = 300
+)
+
+```
+
+```{r}
+write.csv(dt_q, 'dt_q.csv', row.names = FALSE, fileEncoding = "UTF-8")
+```
+
