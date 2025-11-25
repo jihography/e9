@@ -1,0 +1,794 @@
+---
+title: "R-INLA"
+author: "Jiho Kwak, 2020-17530"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# install.packages("showtext")
+library(showtext)
+
+# 한글 폰트 추가 (구글 Noto Sans KR)
+font_add_google("Noto Sans KR", "noto")
+showtext_auto()
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# TUTORIAL
+
+## Data Import
+
+```{r, message=FALSE}
+# install.packages("INLA", repos=c(getOption("repos"),
+#   INLA="https://inla.r-inla-download.org/R/stable"))
+# install.packages(c("data.table","dplyr","stringr","sf","spdep","Matrix"))
+
+library(INLA)
+library(data.table)
+library(dplyr)
+library(stringr)
+library(sf)
+library(spdep)
+library(Matrix)
+
+# added by IS
+inla.setOption(inla.mode = "experimental")
+
+# 경로: 파일을 알맞게 지정하세요
+path <- "panel_full_5.csv"
+
+dt <- fread(path, encoding = "UTF-8")
+
+# 필수 열 확인
+stopifnot(all(c("canon_group_id","yyyymm","e9") %in% names(dt)))
+```
+
+```{r}
+# 1) 읽기
+sgg <- st_read("sgis_sgg_merged/SGG_merged.gpkg", quiet = TRUE)
+
+# 2) 좌표계: 라벨 없으면 set_crs, 있으면 transform (5186 고정)
+crs_now <- st_crs(sgg)
+if (is.na(crs_now)) {
+  sgg <- st_set_crs(sgg, 5186)
+} else if (is.na(crs_now$epsg) || crs_now$epsg != 5186) {
+  sgg <- st_transform(sgg, 5186)
+}
+sgg <- st_make_valid(sgg)
+
+sgg <- sgg |>
+  arrange(new_sigungu_cd) |>
+  mutate(idx = row_number())
+```
+
+```{r}
+# yyyymm → 시간 인덱스/Date
+dt <- dt %>%
+  mutate(
+    year  = as.integer(substr(yyyymm, 1, 4)),
+    month = as.integer(substr(yyyymm, 5, 6)),
+    date  = as.Date(paste0(year,"-",month,"-01"))
+  ) %>%
+  arrange(canon_group_id, date)
+
+# 결측/음수 e9 방지
+dt$e9[is.na(dt$e9)] <- 0
+dt$e9 <- as.integer(round(pmax(dt$e9, 0)))
+
+# 공간 ID와 시간 인덱스 생성
+dt <- dt %>%
+  mutate(
+    space_id = as.integer(factor(canon_group_id)),
+    time_id  = as.integer(factor(date))          # 등간격 월 인덱스
+  )
+
+# 2013년 3월
+dt <- dt %>%
+  mutate(
+    e9 = ifelse(year == 2013 & month == 3,
+                if (is.integer(e9)) as.integer(round(e9 / 2)) else e9 / 2,
+                e9)
+  )
+
+# 세종시 제외
+dt <- dt %>%
+  filter(canon_sigungu_name != '세종시')
+
+# 2013년 이후 & 분기 말 월(3,6,9,12)만 남기기
+dt_q <- dt %>%
+  filter(year >= 2013, month %in% c(3, 6, 9, 12), !(year == 2025 & month == 9)) %>%
+  arrange(canon_group_id, date)
+
+# 시간 인덱스를 분기 단위로 다시 생성 (빠짐없이 연속 수준이면 factor(date)로 충분)
+dt_q <- dt_q %>%
+  mutate(
+    time_id  = as.integer(factor(date)),   # 분기 시점만의 연속 인덱스
+    space_id = as.integer(factor(canon_group_id))
+  )
+
+n_space <- n_distinct(dt_q$space_id)
+n_time  <- n_distinct(dt_q$time_id)
+cat(sprintf("[분기 샘플링] 공간=%d, 분기 시점=%d\n", n_space, n_time))
+
+# offset/노출 정리(권장): population_total이 있으면 offset=log(pop+1)
+dt_q$e9[is.na(dt_q$e9)] <- 0L
+dt_q$log_pop_off <- log(pmax(dt_q$population_total %||% 0, 0) + 1)
+
+# 2) 노출량 E = 인구 -------------------------------------------------
+dt_q <- dt_q %>%
+  mutate(
+    E_pop = as.numeric(population_total)
+  ) %>%
+  # 논리적으로 말이 안 되는 (인구 0인데 e9>0) 관측치는 제거
+  filter(!(E_pop <= 0 & e9 > 0))
+
+# 3) 시군구/시도 ID 생성 --------------------------------------------
+# dt_q 안에 이미 canonical 코드/이름이 있다고 가정:
+#   - sgg_code10  : 시군구 10자리 코드
+#   - canon_sido_name : 시도 이름 (예: '경상남도', '강원특별자치도')
+dt_q <- dt_q %>%
+  mutate(
+    sgg_id  = as.integer(factor(sgg_code10)),       # 시군구 random effect용
+    sido_id = as.integer(factor(canon_sido_name))   # 시도 random effect용
+  )
+
+# 4) 공간 인덱스 맞추기
+dt_q <- dt_q %>%
+  mutate(sgg_code_sgis = as.character(sgg_code_sgis)) %>%
+  left_join(
+    sgg %>%
+      st_drop_geometry() %>%              # geometry 빼고
+      transmute(
+        sgg_code_sgis    = new_sigungu_cd,  # dt_q의 키 이름으로 맞추기
+        idx
+      ),
+    by = "sgg_code_sgis"
+  ) %>%
+  arrange(time_id, idx) %>%
+  mutate(
+    space_id    = idx,
+    space_id_st = idx
+  )
+```
+
+
+## Cleaning covariates
+```{r}
+# dplyr::glimpse(dt_q)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+na_info <- dt_q %>%
+  summarise(across(
+    everything(),
+    ~ sum(is.na(.)),
+    .names = "na_{.col}"
+  )) %>%
+  pivot_longer(
+    everything(),
+    names_to = "var",
+    values_to = "n_na"
+  ) %>%
+  filter(n_na > 0) %>%
+  arrange(desc(n_na))
+
+na_info
+
+```
+
+```{r}
+library(dplyr)
+library(readr)  # parse_number
+
+# 1) 시도 노동력(천명 단위) & rate 문자열 → 숫자
+lf_count_char <- c(
+  "sido_lf_pop_15plus_thousand",
+  "sido_lf_econ_active_pop_thousand",
+  "sido_lf_employed_thousand",
+  "sido_lf_unemployed_thousand",
+  "sido_lf_non_econ_pop_thousand"
+)
+
+lf_rate_char <- c(
+  "sido_lf_econ_participation_rate",
+  "sido_lf_unemployment_rate",
+  "sido_lf_employment_rate",
+  "sido_lf_employment_rate_15_64"
+)
+
+dt_q <- dt_q %>%
+  mutate(
+    across(all_of(c(lf_count_char, lf_rate_char)),
+           ~ readr::parse_number(as.character(.)))
+  )
+```
+
+```{r}
+# count/규모 변수 (음수 없는 것들) → log1p + scale
+count_vars_pos <- c(
+  "e9",
+  "population_total", "population_male", "population_female",
+  "mig_total_in", "mig_total_out",
+  "mig_within_sgg", "mig_within_sido_in", "mig_within_sido_out",
+  "mig_inter_sido_in", "mig_inter_sido_out",
+  "trade_export_cnt", "trade_import_cnt",
+  "trade_export_val", "trade_import_val",
+  # GDP 관련
+  grep("^gdp_curr_", names(dt_q), value = TRUE),
+  # 시도 일자리 규모
+  "sido_num_job_offers", "sido_num_hires",
+  "sido_num_unfilled", "sido_num_current_workers",
+  "sido_num_shortage", "sido_num_planned_hires",
+  # 노동력(천명)
+  lf_count_char
+)
+
+# 음수도 가능한 "net"류 → scale만
+net_vars <- c("trade_balance", "mig_net")
+
+# 비율/구조/지수 → scale만
+ratio_vars <- c(
+  grep("^ind_ratio_", names(dt_q), value = TRUE),
+  "sido_consumer_goods", "sido_capital_goods", "sido_intermediate_goods",
+  lf_rate_char
+)
+
+```
+
+```{r}
+dt_q <- dt_q %>%
+  # (1) 양수/0 count & 규모 변수: log1p + z-score
+  mutate(
+    across(
+      all_of(count_vars_pos),
+      list(
+        log = ~ log1p(.),
+        z   = ~ as.numeric(scale(.))
+      ),
+      .names = "{.col}_{fn}"
+    )
+  ) %>%
+  # (2) net/음수 가능 변수: z-score 만
+  mutate(
+    across(
+      all_of(net_vars),
+      ~ as.numeric(scale(.)),
+      .names = "{.col}_z"
+    )
+  ) %>%
+  # (3) 비율/지수 변수: z-score 만
+  mutate(
+    across(
+      all_of(ratio_vars),
+      ~ as.numeric(scale(.)),
+      .names = "{.col}_z"
+    )
+  )
+
+```
+
+## by year
+
+```{r}
+library(dplyr)
+
+# dt_q를 연도 자료 dt_y로: 같은 시군구×연도 내에서 마지막 분기값만 유지
+dt_y <- dt_q %>%
+  group_by(
+    canon_sido_name,
+    canon_sigungu_name,
+    canon_group_id,
+    sgg_code10,
+    year
+  ) %>%
+  arrange(year, time_id, .by_group = TRUE) %>%
+  slice_tail(n = 1) %>%   # 각 연도에서 마지막 분기(Q4)만 남김
+  ungroup() %>%
+  # (선택) 연도용 time_id_year 생성
+  mutate(
+    time_id_year = as.integer(factor(year))
+  )
+
+# 확인
+dt_y %>% dplyr::count(year)  # 연도별 시군구 개수 확인
+
+```
+
+## save checkpoint
+
+```{r}
+write.csv(dt_q, 'dt_q_mod.csv', row.names = FALSE, fileEncoding = "euc-kr")
+```
+
+```{r}
+write.csv(dt_y, 'dt_y_mod.csv', row.names = FALSE, fileEncoding = "euc-kr")
+```
+
+
+## EDA
+
+```{r}
+dt_q %>% 
+  summarise(
+    n          = n(),
+    n_zero     = sum(e9 == 0),
+    prop_zero  = mean(e9 == 0),
+    mean_y     = mean(e9),
+    var_y      = var(e9),
+    max_y      = max(e9)
+  )
+
+ggplot(dt_q, aes(e9)) +
+  geom_histogram(bins = 50) +
+  scale_y_log10() +           # 꼬리 보기 좋게
+  labs(title = "Distribution of e9 counts (log y-scale)")
+```
+
+```{r}
+agg_time <- dt_q %>% 
+  group_by(time_id, tq_lab) %>%    # tq_lab: "2013Q1" 같은 라벨 있다고 가정
+  summarise(
+    y   = sum(e9),
+    pop = sum(population_total),
+    rate = y / pop,
+    log_rate = log(rate + 1e-9),
+    .groups = "drop"
+  )
+
+ggplot(agg_time, aes(x = time_id, y = log_rate)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = agg_time$time_id, labels = agg_time$tq_lab) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  labs(title = "Log incidence rate over time (aggregated)",
+       x = NULL, y = "log(rate)")
+
+
+```
+
+```{r}
+# 시작 연도/분기 세팅 (필요하면 바꿔줘)
+start_year  <- 2013
+start_quarter <- 1   # Q1
+
+ts_log_rate <- ts(
+  agg_time$log_rate,
+  start     = c(start_year, start_quarter),
+  frequency = 4       # 분기
+)
+
+decomp_stl <- stl(ts_log_rate, s.window = "periodic")  # 계절성 고정 가정
+
+plot(decomp_stl)
+
+library(tidyr)
+library(ggplot2)
+
+stl_df <- cbind(
+  time = as.numeric(time(ts_log_rate)),
+  as.data.frame(decomp_stl$time.series)
+)
+
+stl_df_long <- stl_df %>% 
+  pivot_longer(cols = -time, names_to = "component", values_to = "value")
+
+ggplot(stl_df_long, aes(x = time, y = value)) +
+  geom_line() +
+  facet_wrap(~ component, ncol = 1, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "STL decomposition of log(rate)",
+    x = "time", y = NULL
+  )
+
+# 예: 전체 합산 로그 rate
+ts_log_rate <- ts(agg_time$log_rate, frequency = 4)  # 분기 데이터라면 4
+
+par(mfrow = c(1,2))
+acf(ts_log_rate, main = "ACF of log rate")
+pacf(ts_log_rate, main = "PACF of log rate")
+par(mfrow = c(1,1))
+
+```
+
+```{r}
+plot(decompose(ts_log_rate))
+```
+
+```{r}
+library(tseries)
+acf(ts_log_rate); pacf(ts_log_rate); 
+adf.test(ts_log_rate, 
+         alternative = "stationary")
+```
+
+```{r}
+ts_diff <- diff(ts_log_rate)
+adf.test(ts_diff, 
+         alternative = "stationary")
+plot(ts_diff, type='l')
+```
+
+```{r}
+# 1) rate 계산
+dt_q <- dt_q %>% 
+  mutate(
+    rate     = e9 / population_total,
+    log_rate = log(rate + 1e-9)  # 0 방지용 작은 숫자
+  )
+dt_q <- dt_q %>%
+  mutate(new_sigungu_cd = as.character(sgg_code_sgis))
+
+sgg <- sgg %>%
+  mutate(new_sigungu_cd = as.character(new_sigungu_cd))
+
+# 2) 가장 최근 시점 선택
+last_time <- dt_q %>% summarise(last = max(time_id)) %>% pull(last)
+
+dt_last <- dt_q %>% filter(time_id == last_time)
+
+# 3) geometry join
+sgg_map <- sgg %>% 
+  left_join(dt_last, by = "new_sigungu_cd")
+
+ggplot(sgg_map) +
+  geom_sf(aes(fill = rate), color = "grey70", linewidth = 0.1) +
+  scale_fill_gradient(
+    name = "rate",
+    low  = "grey95",   # 낮은 값: 거의 흰색
+    high = "steelblue" # 높은 값: 진한 파랑
+  ) +
+  labs(
+    title = paste0("Crude rate of E9 (time_id = ", last_time, ")")
+  ) +
+  theme_minimal()
+
+# 5) log(rate) 지도 (범위 더 안정적)
+ggplot(sgg_map) +
+  geom_sf(aes(fill = log_rate), color = "grey70", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(
+    title = paste0("log(rate) of E9 (time_id = ", last_time, ")"),
+    fill  = "log(rate)"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+# 가장 최근 시점만 예시로 사용 (원하면 루프 돌려도 됨)
+dt_last <- dt_q %>% filter(time_id == last_time)
+
+# 비공간 Poisson GLM (offset 포함, covariate는 필요에 따라 추가)
+m0 <- glm(
+  e9 ~ 1 + lnx + lnm,            # covariate 추가 (예시)
+  family = poisson,
+  offset = log_pop_off,
+  data   = dt_last
+)
+
+summary(m0)
+
+# Pearson residual
+dt_last$resid_pearson <- residuals(m0, type = "pearson")
+
+```
+
+```{r}
+sgg_resid <- sgg %>% 
+  left_join(dt_last %>% select(new_sigungu_cd, resid_pearson), 
+            by = "new_sigungu_cd") %>% 
+  filter(!is.na(resid_pearson))
+
+# 잔차 지도
+ggplot(sgg_resid) +
+  geom_sf(aes(fill = resid_pearson), color = "grey70", linewidth = 0.1) +
+  scale_fill_distiller(palette = "RdBu", direction = -1) +
+  labs(
+    title = paste0("Pearson residuals of non-spatial GLM (time_id = ", last_time, ")"),
+    fill  = "residual"
+  ) +
+  theme_minimal()
+
+# Moran's I of residuals
+mi_resid <- moran.test(
+  sgg_resid$resid_pearson,
+  listw = lw,
+  zero.policy = TRUE
+)
+
+mi_resid
+
+```
+
+```{r}
+## ===============================
+## 0) 패키지 & 기본 설정
+## ===============================
+# install.packages(c("dplyr","data.table","ggplot2","tidyr","stringr","forcats"))
+suppressPackageStartupMessages({
+  library(dplyr); library(data.table); library(ggplot2)
+  library(tidyr); library(stringr);  library(forcats)
+})
+
+# dt_q 가 메모리에 있다고 가정
+stopifnot(exists("dt_q"))
+
+## 키 컬럼 가정:
+## sgg_code10, year, month, date, e9, population_total
+req <- c("sgg_code10","year","month","date","e9","population_total")
+stopifnot(all(req %in% names(dt_q)))
+
+dt_q <- dt_q %>%
+  mutate(
+    sgg_code10 = as.character(sgg_code10),
+    year  = as.integer(year),
+    month = as.integer(month),
+    date  = as.Date(date)
+  ) %>%
+  arrange(sgg_code10, date)
+
+## 분기 라벨
+dt_q <- dt_q %>%
+  mutate(Q = ((month - 1L) %/% 3L) + 1L,
+         yq = paste0(year,"Q",Q))
+
+## ===============================
+## 1) 구조·결측·중복·일관성 점검
+## ===============================
+
+# 구조
+str(dt_q)
+
+# 결측 개요
+na_summary <- dt_q %>%
+  summarize(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to="var", values_to="n_na") %>%
+  arrange(desc(n_na))
+print(na_summary)
+
+# 키 중복 (sgg_code10 × date가 유일해야 함)
+dup_keys <- dt_q %>%
+  count(sgg_code10, date) %>%
+  filter(n > 1)
+cat("중복 키 행 수:", nrow(dup_keys), "\n")
+
+# 시간 연속성(분기 빠짐) 점검: 전체 타임라인 기준
+all_quarters <- dt_q %>%
+  distinct(date) %>% arrange(date) %>% pull(date)
+
+gap_check <- dt_q %>%
+  group_by(sgg_code10) %>%
+  summarize(
+    n_rows = n(),
+    n_expected = length(all_quarters),
+    n_missing = n_expected - n_rows,
+    .groups="drop"
+  ) %>%
+  arrange(desc(n_missing))
+print(head(gap_check, 10))
+
+# 논리 불일치: 인구=0인데 e9>0
+bad_rows <- dt_q %>% filter(coalesce(population_total,0) <= 0, e9 > 0)
+cat("인구=0 & e9>0 행 수:", nrow(bad_rows), "\n")
+
+## ===============================
+## 2) 요약 통계 & 제로-인플레이션
+## ===============================
+
+# 전체 분포
+summary(dt_q$e9)
+summary(dt_q$population_total)
+
+# 제로 비율
+prop_zero <- mean(coalesce(dt_q$e9,0) == 0)
+cat(sprintf("e9 = 0 비율: %.1f%%\n", 100*prop_zero))
+
+# 지역별 제로 비율 Top/Bottom
+zero_by_sgg <- dt_q %>%
+  group_by(sgg_code10) %>%
+  summarize(p_zero = mean(e9 == 0, na.rm=TRUE), n=n(), .groups="drop") %>%
+  arrange(desc(p_zero))
+head(zero_by_sgg, 10)
+tail(zero_by_sgg, 10)
+
+# 분기별 총합 추이
+ts_total <- dt_q %>%
+  group_by(yq, date) %>%
+  summarize(e9_total = sum(e9, na.rm=TRUE),
+            pop_total = sum(population_total, na.rm=TRUE),
+            .groups="drop")
+
+## ===============================
+## 3) 기본 시각화
+## ===============================
+
+# (a) e9 분포 히스토그램 (큰 값 꼬리 확인 위해 로그변환도)
+p1 <- ggplot(dt_q, aes(e9)) + 
+  geom_histogram(bins=50) + 
+  labs(title="e9 분포", x="e9", y="count")
+p2 <- ggplot(dt_q %>% mutate(e9_log1p = log1p(e9)),
+             aes(e9_log1p)) + 
+  geom_histogram(bins=50) + 
+  labs(title="log1p(e9) 분포", x="log1p(e9)", y="count")
+print(p1); print(p2)
+
+# (b) 분기별 총합 추이
+p3 <- ggplot(ts_total, aes(x=date, y=e9_total)) +
+  geom_line() + geom_point(size=0.6) +
+  labs(title="분기별 e9 총합 추이", x=NULL, y="sum(e9)")
+print(p3)
+
+# (c) 인구 대비 발생률(10만 명당)
+dt_q <- dt_q %>%
+  mutate(rate_100k = ifelse(population_total > 0, e9 / population_total * 1e5, NA_real_))
+
+ts_rate <- dt_q %>%
+  group_by(yq, date) %>%
+  summarize(rate_100k = sum(e9, na.rm=TRUE) / sum(population_total, na.rm=TRUE) * 1e5,
+            .groups="drop")
+
+p4 <- ggplot(ts_rate, aes(date, rate_100k)) +
+  geom_line() + geom_point(size=0.6) +
+  labs(title="분기별 10만 명당 발생률(전국)", x=NULL, y="rate per 100k")
+print(p4)
+
+# (d) 지역별 시계열 스파게티 (상위 몇 개만 보기: 인구 많은 10곳)
+top_pop <- dt_q %>% group_by(sgg_code10) %>%
+  summarize(pop_tot = sum(population_total, na.rm=TRUE), .groups="drop") %>%
+  arrange(desc(pop_tot)) %>% slice(1:10) %>% pull(sgg_code10)
+
+p5 <- dt_q %>%
+  filter(sgg_code10 %in% top_pop) %>%
+  ggplot(aes(date, rate_100k, group=sgg_code10, color=sgg_code10)) +
+  geom_line() + geom_point(size=0.5) +
+  labs(title="상위 10개 시군구: 10만 명당 발생률", x=NULL, y="rate per 100k") +
+  theme(legend.position="bottom")
+print(p5)
+
+## ===============================
+## 4) SIR(Observed/Expected) 기초
+## ===============================
+
+# 분기별 기준률 r_q = sum(e9)/sum(pop)
+rate_ref <- dt_q %>%
+  group_by(yq) %>%
+  summarize(r_q = sum(e9, na.rm=TRUE) / sum(population_total, na.rm=TRUE),
+            .groups="drop")
+
+dt_q <- dt_q %>%
+  left_join(rate_ref, by="yq") %>%
+  mutate(expected = r_q * population_total,
+         SIR = ifelse(expected > 0, e9 / expected, NA_real_))
+
+summary(dt_q$SIR)
+
+# 분기별 SIR 박스플롯 (전국 분산 확인)
+p6 <- dt_q %>%
+  ggplot(aes(x=fct_reorder(yq, as.numeric(date)), y=SIR)) +
+  geom_boxplot(outlier.size=0.6) +
+  labs(title="분기별 SIR 분포", x=NULL, y="SIR") +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+print(p6)
+
+# 지역별 평균 SIR 상위/하위
+sir_rank <- dt_q %>%
+  group_by(sgg_code10) %>%
+  summarize(SIR_mean = mean(SIR, na.rm=TRUE),
+            SIR_median = median(SIR, na.rm=TRUE),
+            .groups="drop") %>%
+  arrange(desc(SIR_mean))
+head(sir_rank, 10)
+tail(sir_rank, 10)
+
+## ===============================
+## 5) 공변량(있다면) 로그/스케일 & 상관
+## ===============================
+covars <- intersect(c("trade_export_val","trade_import_val","trade_balance"), names(dt_q))
+if (length(covars) > 0) {
+  dt_q <- dt_q %>%
+    mutate(
+      lnx = if ("trade_export_val" %in% names(.)) log1p(trade_export_val) else NA_real_,
+      lnm = if ("trade_import_val" %in% names(.)) log1p(trade_import_val) else NA_real_,
+      bal = if ("trade_balance"    %in% names(.)) trade_balance else NA_real_
+    )
+  # 상관(전국 평균 기준)
+  cov_df <- dt_q %>%
+    summarize(
+      cor_e9_lnx = suppressWarnings(cor(e9, lnx, use="pairwise")),
+      cor_e9_lnm = suppressWarnings(cor(e9, lnm, use="pairwise")),
+      cor_e9_bal = suppressWarnings(cor(e9, bal, use="pairwise")),
+      cor_rate_lnx = suppressWarnings(cor(rate_100k, lnx, use="pairwise")),
+      cor_rate_lnm = suppressWarnings(cor(rate_100k, lnm, use="pairwise")),
+      cor_rate_bal = suppressWarnings(cor(rate_100k, bal, use="pairwise"))
+    )
+  print(cov_df)
+}
+
+## ===============================
+## 6) 이상치·극단치 탐색
+## ===============================
+
+# e9 이상치 후보(상위 0.5%): 분기·지역 표시
+thr <- quantile(dt_q$e9, 0.995, na.rm=TRUE)
+out_e9 <- dt_q %>%
+  filter(e9 >= thr) %>%
+  arrange(desc(e9)) %>%
+  select(sgg_code10, yq, e9, population_total, rate_100k)
+print(out_e9)
+
+# SIR 극단치 (상위 1%)
+thr_sir <- quantile(dt_q$SIR, 0.99, na.rm=TRUE)
+out_sir <- dt_q %>%
+  filter(SIR >= thr_sir) %>%
+  arrange(desc(SIR)) %>%
+  select(sgg_code10, yq, e9, expected, SIR)
+print(out_sir)
+
+## ===============================
+## 7) (옵션) 공간 커버리지 맵 (sf가 있으면)
+## ===============================
+# sgg_merged (sf) 가 있고 코드열이 sgg_code10과 매치 가능하면:
+if (exists("sgg_merged") && inherits(sgg_merged, "sf")) {
+  code_col <- if ("new_sigungu_cd" %in% names(sgg_merged)) "new_sigungu_cd" else
+              if ("sigungu_cd"    %in% names(sgg_merged)) "sigungu_cd"    else
+              if ("signgu_cd"     %in% names(sgg_merged)) "signgu_cd"     else NA_character_
+  if (!is.na(code_col)) {
+    library(sf)
+    sgg_sf <- sgg_merged %>%
+      rename(sgg_code10 = !!code_col) %>%
+      mutate(sgg_code10 = as.character(sgg_code10))
+    # 최근 분기 하나 골라 SIR 혹은 rate 시각화
+    last_yq <- dt_q %>% arrange(date) %>% distinct(yq, date) %>% slice_tail(n=1) %>% pull(yq)
+    map_dt <- dt_q %>% filter(yq == last_yq) %>% select(sgg_code10, SIR, rate_100k)
+    map_sf <- sgg_sf %>% left_join(map_dt, by="sgg_code10")
+    p_map <- ggplot(map_sf) +
+      geom_sf(aes(fill = SIR), color="white", size=0.1) +
+      scale_fill_gradient2(low="#8274FF", mid="white", high="#FF6A4D",
+                           midpoint=1, na.value="grey90", name="SIR") +
+      labs(title=paste("SIR (", last_yq, ")", sep="")) +
+      theme_void()
+    print(p_map)
+  }
+}
+```
+
+```{r}
+library(sf); library(dplyr); library(ggplot2); library(rmapshaper)
+
+# 1) 분기 SIR 요약(속성만)
+sir_df <- dt_q %>%
+  mutate(Q = ((month - 1) %/% 3) + 1L, yq = paste0(year, "Q", Q)) %>%
+  group_by(sgg_code10, yq) %>%
+  summarise(SIR = mean(SIR, na.rm = TRUE), .groups = "drop")
+
+# 2) 단순화한 경계로 단 1번 조인
+sgg_simple <- rmapshaper::ms_simplify(sgg_sf, keep = 0.05, keep_shapes = TRUE)
+map_df <- sgg_simple %>% left_join(sir_df, by = "sgg_code10")
+
+# 3) 캡
+cap <- max(quantile(map_df$SIR, 0.99, na.rm = TRUE), 2, na.rm = TRUE)
+map_df$SIR_cap <- pmin(map_df$SIR, cap)
+
+# 4) 플롯(경계선 생략 + 좌표 계산 최소화)
+p <- ggplot(map_df) +
+  geom_sf(aes(fill = SIR_cap), color = NA) +
+  scale_fill_gradient2(
+    name = "SIR", low = "#8274FF", mid = "white", high = "#FF6A4D",
+    midpoint = 1, limits = c(0, cap), oob = scales::squish
+  ) +
+  coord_sf(datum = NA) +
+  facet_wrap(~ yq, ncol = 6) +
+  labs(title = "Quarterly SIR (Observed / Expected)") +
+  theme_void(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0))
+print(p)
+
+```
+
+

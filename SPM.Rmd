@@ -1,0 +1,219 @@
+---
+title: "SPM"
+author: "Jiho Kwak, 2020-17530"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## SPM
+
+### Merge Si's with General Gu
+
+```{r}
+## SGIS ver.
+
+library(sf)
+library(dplyr)
+library(stringr)
+
+# 1) 읽기
+sgg <- st_read("bnd_sigungu_00_2024_2Q/bnd_sigungu_00_2024_2Q.shp", quiet = TRUE)
+
+# 2) 좌표계 (5186 고정)
+crs_now <- st_crs(sgg)
+if (is.na(crs_now)) {
+  sgg <- st_set_crs(sgg, 5186)
+} else if (is.na(crs_now$epsg) || crs_now$epsg != 5186) {
+  sgg <- st_transform(sgg, 5186)
+}
+sgg <- st_make_valid(sgg)
+
+# 4) 캐릭터 변환
+sgg <- sgg %>%
+  mutate(
+    SIGUNGU_CD = as.character(SIGUNGU_CD),
+    SIGUNGU_NM = as.character(SIGUNGU_NM)
+  )
+
+# 5) "XX시 ~~구"면 "XX시"로 병합, 코드는 끝자리 0으로
+is_city_gu <- grepl("시\\s*.+구$", sgg$SIGUNGU_NM)
+base_city  <- ifelse(
+  is_city_gu,
+  sub("^\\s*([^\\s]+?시)\\s+.*구\\s*$", "\\1", sgg$SIGUNGU_NM),
+  sgg$SIGUNGU_NM
+)
+
+mk_code0 <- function(x){
+  x <- as.character(x); n <- nchar(x)
+  ifelse(n >= 1, paste0(substr(x, 1, n - 1), "0"), x)
+}
+
+sgg2 <- sgg %>%
+  mutate(
+    new_sigungu_nm = base_city,
+    new_sigungu_cd = ifelse(is_city_gu, mk_code0(SIGUNGU_CD), SIGUNGU_CD)
+  )
+
+sgg_merged <- sgg2 %>%
+  group_by(new_sigungu_cd, new_sigungu_nm) %>%
+  summarise(SIGUNGU_NM = dplyr::first(SIGUNGU_NM),
+            .groups   = "drop",
+            do_union  = TRUE) %>%
+  st_make_valid()
+
+cat("before =", nrow(sgg), " / after =", nrow(sgg_merged), "\n")
+
+dir.create("sgis_sgg_merged", showWarnings = FALSE)
+
+# ★ 필드명·한글 모두 걱정 없는 GPKG로 저장
+st_write(
+  sgg_merged,
+  "sgis_sgg_merged/SGG_merged.gpkg",
+  delete_dsn = TRUE,
+  quiet      = TRUE
+)
+
+```
+
+
+
+### Visualization of SPM
+
+```{r}
+library(sf)
+library(spdep)
+if (st_is_longlat(sgg)) sgg <- st_transform(sgg, 5179)
+
+# rook adjacency
+nb_geo <- poly2nb(sgg, queen=FALSE, snap=1e-3)
+
+# coords for kNN fallback
+coords <- st_coordinates(st_point_on_surface(sgg))
+knn1 <- knn2nb(knearneigh(coords, k=1))
+
+# combine
+nb_final <- union.nb(nb_geo, knn1)
+nb_final <- make.sym.nb(nb_final)
+
+lw <- nb2listw(nb_final, style="W", zero.policy=TRUE)
+
+print(n.comp.nb(nb_final)$nc)
+```
+
+```{r}
+library(sf)
+library(spdep)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+
+# -------------------------------------------------------
+# 0. sgg (sf) + lw(listw) 준비
+# -------------------------------------------------------
+sgg <- st_read("sgis_sgg_merged/SGG_merged.gpkg", quiet = TRUE)  # 이미 준비된 sf
+# lw <- nb2listw(nb_final, style="B", zero.policy=TRUE)
+
+# 안전: 좌표계 변환
+if (st_is_longlat(sgg)) {
+  sgg <- st_transform(sgg, 5179)
+}
+
+# 인덱스 고정
+sgg <- sgg |>
+  arrange(new_sigungu_cd) |>
+  mutate(idx = row_number())
+
+# centroid
+cent <- st_point_on_surface(sgg)
+coords <- st_coordinates(cent)
+
+# -------------------------------------------------------
+# 1. lw(listw) → edge list 생성
+# -------------------------------------------------------
+
+nb <- lw$neighbours  # neighbour list
+n  <- length(nb)
+
+edge_df <- map2_dfr(
+  .x = seq_len(n),
+  .y = nb,
+  .f = ~{
+    if (!length(.y)) return(NULL)
+    tibble(from = .x, to = .y)
+  }
+) |> filter(from < to)
+
+# LINESTRING 생성
+line_list <- map(seq_len(nrow(edge_df)), function(k) {
+  i <- edge_df$from[k]
+  j <- edge_df$to[k]
+  st_linestring(rbind(coords[i,], coords[j,]))
+})
+
+skeleton <- st_sf(
+  edge_df,
+  geometry = st_sfc(line_list, crs = st_crs(sgg))
+)
+
+# -------------------------------------------------------
+# 2. 시각화
+# -------------------------------------------------------
+
+g <- ggplot() +
+  geom_sf(data = sgg, fill = NA, color = "grey40", linewidth = 0.3) +
+  geom_sf(data = skeleton, color = "steelblue", linewidth = 0.3, alpha = 0.7) +
+  geom_sf(data = cent, color = "red", size = 1.1) +
+  theme_void() +
+  coord_sf()
+
+print(g)
+
+# -------------------------------------------------------
+# 3. 고해상도 저장
+# -------------------------------------------------------
+ggsave("SGG_adj_from_lw.png", g,
+       width = 11, height = 11, dpi = 600)
+
+# ggsave("SGG_adj_from_lw.pdf", g,
+#        width = 11, height = 11)
+
+```
+
+### conversion to graph
+
+```{r}
+# install.packages(c("sf","spdep","Matrix"))
+library(sf)
+library(spdep)
+library(Matrix)
+
+# 희소행렬(dgCMatrix)로 추출
+W <- listw2mat(lw)        # base matrix
+W <- Matrix(W, sparse=TRUE)
+
+# 4) INLA 그래프 파일/객체 -----------------------------------------------------
+# INLA는 인접 리스트 파일(.adj) 또는 행렬에서 그래프를 읽을 수 있음
+# (버전 따라 행렬 직접 read가 안될 수 있어 안전하게 파일로 저장)
+# INLA::inla.write.graph(as.matrix(W > 0), file = "sgg_graph.adj")
+G <- INLA::inla.read.graph("sgg_graph.adj")
+
+# 6) 출력 요약 ------------------------------------------------------------------
+cat("N =", nrow(sgg_merged),
+    "\nEdges =", sum(card(nb)),
+    "\nIslands after fix =", sum(card(nb) == 0),
+    "\nW dim =", paste(dim(W), collapse=" x "), "\n")
+
+# 7) ID 순서(중요) -------------------------------------------------------------
+# BYM2 등에 넣을 때, 모델 데이터의 공간 인덱스 순서가
+# sgg_merged의 row 순서(= nb/W 순서)와 일치해야 합니다.
+# 안전하게 키를 벡터로 저장해두세요:
+write.csv(data.frame(node_index = seq_len(nrow(sgg_merged)),
+                     sgg_code = sgg_merged[[id_col]]),
+          "sgg_graph_nodes.csv", row.names = FALSE, fileEncoding = "UTF-8")
+```
+
+
