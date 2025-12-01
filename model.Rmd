@@ -86,15 +86,16 @@ dt_q$E_e9 <- dt_q$population * (sum(dt_q$e9) / sum(dt_q$population))
 
 
 fit_baseline_q <- inla(
-  e9_f ~ 1 + f(time_id, model = "rw1", scale.model = TRUE,
-             hyper = list(prec = list(prior = "pc.prec", param = c(1, 0.01)))),
+  e9_f ~ 1 + offset(log(population_total)) + f(time_id, model = "ar1",# scale.model = TRUE,
+             hyper = list(prec = list(prior = "pc.prec", param = c(0.8, 0.5)))),
   data = dt_q,
-  family = "poisson",
-  offset = log(dt_q$population_total),   # ← 여기!
+  family = "zeroinflatedpoisson0",
+  # offset = log(dt_q$population_total),   # ← 여기!
   control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
   control.predictor = list(link = 1, compute = TRUE),
-  control.inla      = list(strategy = "simplified.laplace",
-                           control.vb = list(emergency = 50))
+  control.inla      = list(strategy = "laplace",
+                           control.vb = list(strategy = "variance")),
+  verbose = TRUE
 )
 
 summary(fit_baseline_q)
@@ -118,7 +119,7 @@ dt_q <- dt_q %>% mutate(E_pop = as.numeric(population_total))
 dt_q <- dt_q %>% filter(!(E_pop <= 0 & e9 > 0))
 
 # 2) (중요) 공식(formula)을 명시적으로 따로 보관
-form_baseline_q <- e9 ~ 1 + 
+form_baseline_q <- e9 ~ 1 + offset(log(population_total)) + 
   f(time_id, model="rw1", scale.model=TRUE,
     hyper=list(prec=list(prior="pc.prec", param=c(1,0.01))))
 
@@ -130,10 +131,10 @@ fit_rw1cov_q <- inla(
   formula = form_rw1cov_q,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  # offset       = log(dt_q$population_total), #dt_q$E_pop,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
-  control.inla      = list(strategy="simplified.laplace",
+  control.inla      = list(strategy="laplace",
                            control.vb=list(emergency=50))
 )
 
@@ -145,11 +146,11 @@ fit_rw1cov_q$waic$waic; fit_rw1cov_q$dic$dic
 ### AR1_null
 
 ```{r}
-form_ar1 <- e9 ~ 1 +
+form_ar1 <- e9 ~ 1 + offset(log(population_total)) + 
   f(time_id, model="ar1",
     hyper = list(
       theta1 = list(prior="pc.prec", param=c(1, 0.01)),
-      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))     # AR(1) 상관 PC prior
+      rho  = list(prior="pc.cor1", param=c(0.8, 0.5))     # AR(1) 상관 PC prior
     )
   )
 
@@ -157,7 +158,7 @@ fit_ar1 <- inla(
   formula = form_ar1,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  # offset       = dt_q$E_pop,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
@@ -179,7 +180,7 @@ fit_ar1cov_q <- inla(
   formula = form_ar1cov_q,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  # E       = dt_q$E_pop,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
@@ -216,7 +217,7 @@ dt_q <- dt_q %>%
 ```{r}
 # BYM2: 공간, 그래프=G
 # AR(1): 시간
-form_bym2_ar1 <- e9 ~ 1 +
+form_bym2_ar1 <- e9 ~ 1 + offset(log(population_total)) + 
   f(space_id, model="bym2", graph=G,
     scale.model=TRUE,
     hyper = list(
@@ -235,7 +236,7 @@ fit_bym2_ar1 <- inla(
   formula = form_bym2_ar1,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  # E       = dt_q$E_pop,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
@@ -254,13 +255,13 @@ fit_bym2_ar1$waic$waic; fit_bym2_ar1$dic$dic
 dt_q <- dt_q %>% arrange(time_id, space_id)
 dt_q$space_id_st <- dt_q$space_id          # 동일 값이지만 group=time_id로 복제될 것
 
-form_interaction <- e9 ~ 1 +
+form_interaction <- e9 ~ 1 + offset(log(population_total)) + 
   # # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
-  # f(space_id, model="bym2", graph=G, scale.model=TRUE,
-  #   hyper = list(
-  #     prec = list(prior="pc.prec", param=c(1, 0.01)),
-  #     phi  = list(prior="pc", param=c(0.5, 0.5))
-  #   )) +
+  f(space_id, model="bym2", graph=G, scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )) +
   # 메인 시간효과
   f(time_id, model="ar1",
     hyper = list(
@@ -285,11 +286,13 @@ fit_interaction <- inla(
   formula = form_interaction,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  # E       = dt_q$E_pop,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
-                           control.vb=list(emergency=50))
+                           improved.simplified.laplace = TRUE,
+                           control.vb=list(emergency=50)),
+  verbose = TRUE
 )
 
 summary(fit_interaction)
@@ -301,7 +304,7 @@ fit_interaction$waic$waic; fit_interaction$dic$dic
 ### BYM2 \* AR + cov
 
 ```{r}
-form_interaction <- e9 ~ 1 +
+form_interaction <- e9 ~ 1 +offset(log(population_total)) + 
   # # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
   f(space_id, model="bym2", graph=G, scale.model=TRUE,
     hyper = list(
@@ -342,15 +345,16 @@ fit_cov_q <- inla(
   formula = form_cov_q,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$population,   # ★ 인구를 기대노출로
+  # E       = dt_q$population,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
+                            improved.simplified.laplace = TRUE,
                            int.strategy = "auto",
                            control.vb=list(emergency=50)),
   verbose = TRUE
 )
-
+# crashed
 summary(fit_cov_q)
 fit_cov_q$waic$waic; fit_cov_q$dic$dic
 ```
