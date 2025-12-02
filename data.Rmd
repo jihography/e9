@@ -36,7 +36,7 @@ library(Matrix)
 inla.setOption(inla.mode = "experimental")
 
 # 경로: 파일을 알맞게 지정하세요
-path <- "panel_full_5.csv"
+path <- "panel_full_7.csv"
 
 dt <- fread(path, encoding = "UTF-8")
 
