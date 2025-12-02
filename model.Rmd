@@ -192,26 +192,6 @@ fit_ar1cov_q$waic$waic; fit_ar1cov_q$dic$dic
 ```
 
 ### BYM2 + AR
-#### Space_id alignment
-```{r}
-# 공간 인덱스 맞추기
-dt_q <- dt_q %>%
-  mutate(sgg_code_sgis = as.character(sgg_code_sgis)) %>%
-  left_join(
-    sgg %>%
-      st_drop_geometry() %>%              # geometry 빼고
-      transmute(
-        sgg_code_sgis    = new_sigungu_cd,  # dt_q의 키 이름으로 맞추기
-        idx
-      ),
-    by = "sgg_code_sgis"
-  ) %>%
-  arrange(time_id, idx) %>%
-  mutate(
-    space_id    = idx,
-    space_id_st = idx
-  )
-```
 
 ```{r}
 # BYM2: 공간, 그래프=G
@@ -602,6 +582,18 @@ data.frame(
 hist(fit_bym2_ar1$cpo$pit, breaks=30, main="PIT (BYM2+AR1)")
 ```
 
+```{r}
+dt_y <- dt_y %>%
+  mutate(sex_ratio = as.numeric(scale(population_male / population_female)))
+```
+
+```{r}
+dt_y <- dt_y %>%
+  filter(year <= 2024) %>%
+  arrange(canon_group_id, date)
+```
+
+
 ## yearly
 ```{r}
 form_interaction_y <- e9 ~ 1 +
@@ -631,128 +623,147 @@ form_interaction_y <- e9 ~ 1 +
     )
   )
 
-fit_interaction_y <- inla(
-  formula = form_interaction_y,
+# 3) 공변량 추가한 공식
+form_cov_y <- update(form_interaction_y, . ~ . + 
+                       sex_ratio_z +
+                       pop_65plus_z +
+                       trade_balance_z +
+                       mig_total_out_z +
+                       ind_ratio_manufacturing_z +
+                       ind_ratio_construction_z + 
+                       ind_ratio_wholesale_retail_z +
+                       lf_employment_rate_15_64
+                     )
+
+# 4) 적합 (E= 방식; offset 쓰지 않음)
+fit_cov_y <- inla(
+  formula = form_cov_y,
   data    = dt_y,
   family  = "poisson",
-  E       = dt_y$E_pop,   # ★ 인구를 기대노출로
+  E       = dt_y$population_total,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
-                           control.vb=list(emergency=50))
+                           int.strategy = "auto",
+                           control.vb=list(emergency=50)),
+  verbose = TRUE
 )
 
-summary(fit_interaction_y)
-fit_interaction_y$waic$waic; fit_interaction_y$dic$dic
+summary(fit_cov_y)
+fit_cov_y$waic$waic; fit_cov_y$dic$dic
+```
+## Prediction
+```{r}
+
 ```
 
 
 ## Sido + Sigungu
 
 ```{r}
-form_cov_sido_q <- update(form_interaction, . ~ . + 
-                       trade_export_val_z +
-                       ind_ratio_manufacturing_z +
-                       mig_net_z +
-                       sido_lf_unemployment_rate_z +
-                       sido_num_shortage_z +
-    f(sgg_id,
-      model = "iid",
-      hyper = list(
-        prec = list(prior = "pc.prec", param = c(1, 0.01))
-      )
-    ) +
-    f(sido_id,
-      model = "iid",
-      hyper = list(
-        prec = list(prior = "pc.prec", param = c(1, 0.01))
-      )
-    )
-)
-
-# 6) INLA 적합 -------------------------------------------------------
-fit_cov_sido_q <- inla(
-  formula = form_cov_sido_q,
-  data    = dt_q,
-  family  = "poisson",
-  E       = dt_q$E_pop,   # 인구를 기대노출로 사용
-
-  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
-  control.predictor = list(link = 1, compute = TRUE),
-  control.inla      = list(
-    strategy   = "simplified.laplace",
-    control.vb = list(emergency = 50)
-  )
-)
-
-# 7) 결과 확인 -------------------------------------------------------
-summary(fit_cov_sido_q)
-fit_cov_sido_q$waic$waic
-fit_cov_sido_q$dic$dic
+# form_cov_sido_q <- update(form_interaction, . ~ . + 
+#                        trade_export_val_z +
+#                        ind_ratio_manufacturing_z +
+#                        mig_net_z +
+#                        sido_lf_unemployment_rate_z +
+#                        sido_num_shortage_z +
+#     f(sgg_id,
+#       model = "iid",
+#       hyper = list(
+#         prec = list(prior = "pc.prec", param = c(1, 0.01))
+#       )
+#     ) +
+#     f(sido_id,
+#       model = "iid",
+#       hyper = list(
+#         prec = list(prior = "pc.prec", param = c(1, 0.01))
+#       )
+#     )
+# )
+# 
+# # 6) INLA 적합 -------------------------------------------------------
+# fit_cov_sido_q <- inla(
+#   formula = form_cov_sido_q,
+#   data    = dt_q,
+#   family  = "poisson",
+#   E       = dt_q$E_pop,   # 인구를 기대노출로 사용
+# 
+#   control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+#   control.predictor = list(link = 1, compute = TRUE),
+#   control.inla      = list(
+#     strategy   = "simplified.laplace",
+#     control.vb = list(emergency = 50)
+#   )
+# )
+# 
+# # 7) 결과 확인 -------------------------------------------------------
+# summary(fit_cov_sido_q)
+# fit_cov_sido_q$waic$waic
+# fit_cov_sido_q$dic$dic
 
 ```
 
 ```{r}
-# (선택) 전역 시간 효과를 따로 둘 거면 유지, 아니면 빼도 됨
-form_bym2rw_main <- e9 ~ 1 +
-  lnx + lnm + ln_gdp_pc +
-  sido_consumer_goods_z + sido_capital_goods_z +
-  
-  # 전역 시간 효과
-  f(
-    time_id,
-    model       = "rw1",
-    scale.model = TRUE,
-    hyper       = list(
-      prec = list(prior = "pc.prec", param = c(1, 0.01))
-    )
-  ) +
-
-  # 시군구×시간 BYM2⊗RW1 (상호작용)
-  f(
-    sgg_id,
-    model       = "bym2",
-    graph       = G,
-    group       = time_id,      # ★ group = time
-    control.group = list(
-      model       = "rw1",
-      scale.model = TRUE,
-      hyper       = list(
-        prec = list(prior = "pc.prec", param = c(1, 0.01))
-      )
-    ),
-    scale.model = TRUE,
-    hyper       = list(
-      prec = list(prior = "pc.prec", param = c(0.5, 0.01)),
-      phi  = list(prior = "pc",       param = c(0.5, 2/3))
-    )
-  ) +
-  
-  # (원하면) 시도 iid 효과 추가
-  f(
-    sido_id,
-    model = "iid",
-    hyper = list(
-      prec = list(prior = "pc.prec", param = c(1, 0.01))
-    )
-  )
-
-fit_bym2rw_main <- inla(
-  formula = form_bym2rw_main,
-  data    = dt_q,
-  family  = "poisson",
-  E       = dt_q$E_pop,
-  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
-  control.predictor = list(link = 1, compute = TRUE),
-  control.inla      = list(
-    strategy   = "simplified.laplace",
-    control.vb = list(emergency = 50)
-  )
-)
-
-summary(fit_bym2rw_main)
-fit_bym2rw_main$waic$waic
-fit_bym2rw_main$dic$dic
+# # (선택) 전역 시간 효과를 따로 둘 거면 유지, 아니면 빼도 됨
+# form_bym2rw_main <- e9 ~ 1 +
+#   lnx + lnm + ln_gdp_pc +
+#   sido_consumer_goods_z + sido_capital_goods_z +
+#   
+#   # 전역 시간 효과
+#   f(
+#     time_id,
+#     model       = "rw1",
+#     scale.model = TRUE,
+#     hyper       = list(
+#       prec = list(prior = "pc.prec", param = c(1, 0.01))
+#     )
+#   ) +
+# 
+#   # 시군구×시간 BYM2⊗RW1 (상호작용)
+#   f(
+#     sgg_id,
+#     model       = "bym2",
+#     graph       = G,
+#     group       = time_id,      # ★ group = time
+#     control.group = list(
+#       model       = "rw1",
+#       scale.model = TRUE,
+#       hyper       = list(
+#         prec = list(prior = "pc.prec", param = c(1, 0.01))
+#       )
+#     ),
+#     scale.model = TRUE,
+#     hyper       = list(
+#       prec = list(prior = "pc.prec", param = c(0.5, 0.01)),
+#       phi  = list(prior = "pc",       param = c(0.5, 2/3))
+#     )
+#   ) +
+#   
+#   # (원하면) 시도 iid 효과 추가
+#   f(
+#     sido_id,
+#     model = "iid",
+#     hyper = list(
+#       prec = list(prior = "pc.prec", param = c(1, 0.01))
+#     )
+#   )
+# 
+# fit_bym2rw_main <- inla(
+#   formula = form_bym2rw_main,
+#   data    = dt_q,
+#   family  = "poisson",
+#   E       = dt_q$E_pop,
+#   control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+#   control.predictor = list(link = 1, compute = TRUE),
+#   control.inla      = list(
+#     strategy   = "simplified.laplace",
+#     control.vb = list(emergency = 50)
+#   )
+# )
+# 
+# summary(fit_bym2rw_main)
+# fit_bym2rw_main$waic$waic
+# fit_bym2rw_main$dic$dic
 ```
 
 
