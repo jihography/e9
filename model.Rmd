@@ -82,23 +82,48 @@ G <- INLA::inla.read.graph("sgg_graph.adj")
 
 ```{r}
 dt_q$e9_f <- dt_q$e9 + 1L
-dt_q$E_e9 <- dt_q$population * (sum(dt_q$e9) / sum(dt_q$population))
-
+dt_q$E_e9 <- dt_q$population_total * (sum(dt_q$e9) / sum(dt_q$population_total))
+dt_q$RR <- dt_q$e9 / dt_q$E_e9
 
 fit_baseline_q <- inla(
-  e9_f ~ 1 + offset(log(population_total)) + f(time_id, model = "ar1",# scale.model = TRUE,
-             hyper = list(prec = list(prior = "pc.prec", param = c(0.8, 0.5)))),
+  e9_f ~ #1 + #offset(log(population_total)) + 
+  f(time_id, model = "ar1",# scale.model = TRUE,
+             hyper = list(prec = list(prior = "pc.prec", param = c(1, 0.01)))),
   data = dt_q,
-  family = "zeroinflatedpoisson0",
+  family = "poisson",
+  E = dt_q$E_e9,
   # offset = log(dt_q$population_total),   # ← 여기!
   control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
-  control.predictor = list(link = 1, compute = TRUE),
-  control.inla      = list(strategy = "laplace",
-                           control.vb = list(strategy = "variance")),
+  control.predictor = list(compute = TRUE),
+  control.inla      = list(strategy = "simplified.laplace",
+                            improved.simplified.laplace = TRUE,
+                           control.vb = list(strategy = "mean")),
   verbose = TRUE
 )
 
 summary(fit_baseline_q)
+
+```
+
+```{r}
+fit_baseline_q <- inla(
+  RR ~ 1 + #offset(log(population_total)) + 
+  f(time_id, model = "ar1",# scale.model = TRUE,
+             hyper = list(prec = list(prior = "pc.prec", param = c(1, 0.01)))),
+  data = dt_q,
+  family = "lognormal",
+  # E = dt_q$E_e9,
+  # offset = log(dt_q$population_total),   # ← 여기!
+  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE),
+  control.inla      = list(strategy = "simplified.laplace",
+                            improved.simplified.laplace = TRUE,
+                           control.vb = list(strategy = "mean")),
+  verbose = TRUE
+)
+
+summary(fit_baseline_q)
+
 
 ```
 
@@ -120,11 +145,25 @@ dt_q <- dt_q %>% filter(!(E_pop <= 0 & e9 > 0))
 
 # 2) (중요) 공식(formula)을 명시적으로 따로 보관
 form_baseline_q <- e9 ~ 1 + offset(log(population_total)) + 
-  f(time_id, model="rw1", scale.model=TRUE,
-    hyper=list(prec=list(prior="pc.prec", param=c(1,0.01))))
+  f(time_id, model="ar1", #scale.model=TRUE,
+    hyper=list(prec=list(prior="pc.prec", param=c(0.01,0.01))))
 
 # 3) 공변량 추가한 공식
-form_rw1cov_q <- update(form_baseline_q, . ~ . + lnx + lnm + balzs)
+form_rw1cov_q <- update(form_baseline_q, . ~ . + 
+                       trade_balance_z +
+                       mig_total_out_z +
+                       # grdp_1st_z +
+                       # grdp_2nd_z +
+                       # grdp_3rd_z +
+                       ind_ratio_manufacturing_z +
+                       ind_ratio_construction_z +
+                       ind_ratio_wholesale_retail_z +
+                       lf_employment_rate_15_64 +
+                       dummy_covid +
+                       dummy_capital +
+                      #  dummy_si +
+                       dummy_gun
+)
 
 # 4) 적합 (E= 방식; offset 쓰지 않음)
 fit_rw1cov_q <- inla(
@@ -133,11 +172,45 @@ fit_rw1cov_q <- inla(
   family  = "poisson",
   # offset       = log(dt_q$population_total), #dt_q$E_pop,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
-  control.predictor = list(link=1, compute=TRUE),
-  control.inla      = list(strategy="laplace",
-                           control.vb=list(emergency=50))
+  control.predictor = list(compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           improved.simplified.laplace = TRUE,
+                           control.vb=list(emergency=50)),
+  verbose = TRUE
 )
 
+
+library(tidycensuskr)
+data(adm2_sf_2020)
+adm2 <- adm2_sf_2020
+adm2 <- sf::st_read("/home/felix/Documents/admsgg_simp.gpkg") |>
+  dplyr::mutate(sggcd = as.integer(ifelse(substr(LEGLCD_SE, 1, 4) == "4811", "48110", substr(LEGLCD_SE, 1, 5)))) |>
+  dplyr::group_by(sggcd) |>
+  dplyr::summarize() |>
+  dplyr::ungroup()
+sf::st_crs(adm2) <- "EPSG:5179"
+
+tinyplot::plt(
+  x = as.integer(as.factor(dt_q$yyyymm)), y = dt_q$e9_f,
+  by = dt_q$sgg_code10, type = "l",
+  data = dt_q
+)
+
+
+adm2x <-
+  adm2 |>
+  dplyr::left_join(
+    dt_q |>
+      dplyr::filter(year == 2021, quarter == 4) |>
+      dplyr::select(sgg_code10, e9_f) |>
+      dplyr::distinct(),
+    by = c("sggcd" = "sgg_code10")
+  )
+plot(adm2x[, "e9_f"])
+
+dt_q |>
+  dplyr::filter(canon_sigungu_name == "창원시") |>
+  dplyr::select(sgg_code10)
 
 summary(fit_rw1cov_q)
 fit_rw1cov_q$waic$waic; fit_rw1cov_q$dic$dic
@@ -153,6 +226,16 @@ form_ar1 <- e9 ~ 1 + offset(log(population_total)) +
       rho  = list(prior="pc.cor1", param=c(0.8, 0.5))     # AR(1) 상관 PC prior
     )
   )
+
+
+form_ar1_rr <- e9_f ~ 1 +
+  f(time_id, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.8, 0.5))     # AR(1) 상관 PC prior
+    )
+  )
+
 
 fit_ar1 <- inla(
   formula = form_ar1,
@@ -173,22 +256,28 @@ fit_ar1$waic$waic; fit_ar1$dic$dic
 
 ```{r}
 # 3) 공변량 추가한 공식
-form_ar1cov_q <- update(form_ar1, . ~ . + lnx + lnm + balzs)
+form_ar1cov_q <- update(form_ar1_rr, . ~ . + lnx + lnm + balzs)
+
+options(inla.mode = "experimental")
 
 # 4) 적합 (E= 방식; offset 쓰지 않음)
-fit_ar1cov_q <- inla(
+fit_ar1cov_q_rr <- inla(
   formula = form_ar1cov_q,
   data    = dt_q,
   family  = "poisson",
-  # E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  E       = dt_q$E_e9,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
-  control.predictor = list(link=1, compute=TRUE),
+  control.predictor = list(compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
-                           control.vb=list(emergency=50))
+  improved.simplified.laplace = TRUE,
+                           control.vb=list(emergency=50)),
+  verbose = TRUE
 )
 
+pairs(dt_q[, c("e9_f", "E_e9", "lnx", "lnm", "balzs")])
 
-summary(fit_ar1cov_q)
+
+summary(fit_ar1cov_q_rr)
 fit_ar1cov_q$waic$waic; fit_ar1cov_q$dic$dic
 ```
 
@@ -218,9 +307,11 @@ fit_bym2_ar1 <- inla(
   family  = "poisson",
   # E       = dt_q$E_pop,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
-  control.predictor = list(link=1, compute=TRUE),
+  control.predictor = list(link = 1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
-                           control.vb=list(emergency=50))
+  improved.simplified.laplace = TRUE,
+                           control.vb=list(emergency=50)),
+  verbose = TRUE
 )
 
 summary(fit_bym2_ar1)
@@ -588,7 +679,7 @@ hist(fit_bym2_ar1$cpo$pit, breaks=30, main="PIT (BYM2+AR1)")
 
 ```{r}
 dt_y <- dt_y %>%
-  mutate(sex_ratio = as.numeric(scale(population_male / population_female)))
+  mutate(sex_ratio = as.numeric(100 * (population_male / population_female)))
 ```
 
 ```{r}
@@ -612,46 +703,53 @@ form_interaction_y <- e9 ~ 1 +
     hyper = list(
       theta1 = list(prior="pc.prec", param=c(1, 0.01)),
       rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
-    )) +
+    )) #+
   # 공간×시간 상호작용: BYM2를 시간별 복제, 시간 간 AR(1)로 연결
-  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
-    group = time_id_year,
-    control.group = list(model="ar1",
-                         hyper = list(
-                           theta1 = list(prior="pc.prec", param=c(1, 0.01)),
-                           rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
-                         )),
-    hyper = list(
-      prec = list(prior="pc.prec", param=c(1, 0.01)),
-      phi  = list(prior="pc", param=c(0.5, 0.5))
-    )
-  )
+  # f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+  #   group = time_id_year,
+  #   control.group = list(model="ar1",
+  #                        hyper = list(
+  #                          theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+  #                          rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+  #                        )),
+  #   hyper = list(
+  #     prec = list(prior="pc.prec", param=c(1, 0.01)),
+  #     phi  = list(prior="pc", param=c(0.5, 0.5))
+  #   )
+  # )
 
+dt_y <- dt_y |>
+  dplyr::mutate(
+    trade_balance_1m = trade_balance / 1e6 # original in 1000s
+  )
 # 3) 공변량 추가한 공식
-form_cov_y <- update(form_interaction_y, . ~ . + 
-                       sex_ratio_z +
-                       pop_65plus_z +
-                       trade_balance_z +
-                       mig_total_out_z +
+form_cov_y <- update(form_interaction_y, . ~ . +
+                       sex_ratio +
+                      # pop_65plus +
+                      #  trade_balance +
+                      #  mig_total_out +
                        # grdp_1st_z +
                        # grdp_2nd_z +
                        # grdp_3rd_z +
-                       ind_ratio_manufacturing_z +
-                       ind_ratio_construction_z +
-                       ind_ratio_wholesale_retail_z +
+                       ind_ratio_manufacturing +
+                       ind_ratio_construction +
+                       ind_ratio_wholesale_retail +
                        lf_employment_rate_15_64 +
                        dummy_covid +
                        dummy_capital +
-                       dummy_si +
+                      # dummy_si +
                        dummy_gun
                      )
+
+dt_y$E_e9 <- dt_y$population_total * (sum(dt_y$e9) / sum(dt_y$population_total))
 
 # 4) 적합 (E= 방식; offset 쓰지 않음)
 fit_cov_y <- inla(
   formula = form_cov_y,
   data    = dt_y,
   family  = "poisson",
-  E       = dt_y$population_total,   # ★ 인구를 기대노출로
+  E      = dt_y$E_e9,
+  # offset       = log(dt_y$population_total),   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",

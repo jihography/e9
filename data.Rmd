@@ -36,7 +36,7 @@ library(Matrix)
 inla.setOption(inla.mode = "experimental")
 
 # 경로: 파일을 알맞게 지정하세요
-path <- "panel_full_9.csv"
+path <- "panel_full_10.csv"
 
 dt <- fread(path, encoding = "UTF-8")
 
@@ -65,12 +65,12 @@ sgg <- sgg |>
 ```{r}
 # yyyymm → 시간 인덱스/Date
 dt <- dt %>%
-  mutate(
+  dplyr::mutate(
     year  = as.integer(substr(yyyymm, 1, 4)),
     month = as.integer(substr(yyyymm, 5, 6)),
     date  = as.Date(paste0(year,"-",month,"-01"))
   ) %>%
-  arrange(canon_group_id, date)
+  dplyr::arrange(canon_group_id, date)
 
 # 결측/음수 e9 방지
 dt$e9[is.na(dt$e9)] <- 0
@@ -97,8 +97,8 @@ dt <- dt %>%
 
 # 성비 계산
 dt <- dt %>%
-  mutate(sex_ratio = as.numeric(population_male / population_female),
-         pop_65plus_ratio = as.numeric(pop_65plus / population_total))
+  mutate(sex_ratio = as.numeric(100 * population_male / population_female),
+         pop_65plus_ratio = as.numeric(100 * pop_65plus / population_total))
 
 dt <- dt %>% 
   mutate(
@@ -224,12 +224,12 @@ library(dplyr)
 library(tidyr)
 
 na_info <- dt_q %>%
-  summarise(across(
+  dplyr::summarise(across(
     everything(),
     ~ sum(is.na(.)),
     .names = "na_{.col}"
   )) %>%
-  pivot_longer(
+  tidyr::pivot_longer(
     everything(),
     names_to = "var",
     values_to = "n_na"
