@@ -36,7 +36,7 @@ library(Matrix)
 inla.setOption(inla.mode = "experimental")
 
 # 경로: 파일을 알맞게 지정하세요
-path <- "panel_full_5.csv"
+path <- "panel_full_9.csv"
 
 dt <- fread(path, encoding = "UTF-8")
 
@@ -94,6 +94,67 @@ dt <- dt %>%
 # 세종시 제외
 dt <- dt %>%
   filter(canon_sigungu_name != '세종시')
+
+# 성비 계산
+dt <- dt %>%
+  mutate(sex_ratio = as.numeric(population_male / population_female),
+         pop_65plus_ratio = as.numeric(pop_65plus / population_total))
+
+dt <- dt %>% 
+  mutate(
+    denom   = coalesce(gdp_curr_gdp_total, 0),
+    grdp_1st = if_else(
+      denom > 0,
+      coalesce(gdp_curr_agriculture, 0) / denom,
+      0
+    ),
+    grdp_2nd = if_else(
+      denom > 0,
+      (coalesce(gdp_curr_mining, 0) +
+       coalesce(gdp_curr_manufacturing, 0) +
+       coalesce(gdp_curr_electricity_gas, 0) +
+       coalesce(gdp_curr_construction, 0)) / denom,
+      0
+    ),
+    grdp_3rd = 1 - grdp_1st - grdp_2nd
+  ) %>% 
+  select(-denom)
+
+# 필요 더미 추가
+covid_start <- 202003L   # 필요하면 여기서 조정
+covid_end   <- 202212L
+
+dt <- dt %>%
+  mutate(
+    # yyyymm 숫자형으로
+    yyyymm = as.integer(yyyymm),
+
+    # 1) 수도권 더미 (서울특별시 / 인천광역시 / 경기도)
+    dummy_capital = if_else(
+      canon_sido_name %in% c("서울특별시", "인천광역시", "경기도"),
+      1L, 0L,
+      missing = 0L
+    ),
+
+    # 2) 시/군/구 타입 더미
+    sgg_suffix = str_sub(str_trim(canon_sigungu_name), -1),
+    sgg_type = case_when(
+      sgg_suffix == "시" ~ "si",
+      sgg_suffix == "군" ~ "gun",
+      sgg_suffix == "구" ~ "gu",
+      TRUE              ~ "other"
+    ),
+    dummy_si  = as.integer(sgg_type == "si"),
+    dummy_gun = as.integer(sgg_type == "gun"),
+    dummy_gu  = as.integer(sgg_type == "gu"),
+
+    # 3) 코로나 기간 더미 (예: 2020-03 ~ 2022-12)
+    dummy_covid = if_else(
+      dplyr::between(yyyymm, covid_start, covid_end),
+      1L, 0L,
+      missing = 0L
+    )
+  )
 
 # 2013년 이후 & 분기 말 월(3,6,9,12)만 남기기
 dt_q <- dt %>%
@@ -211,7 +272,7 @@ dt_q <- dt_q %>%
 # count/규모 변수 (음수 없는 것들) → log1p + scale
 count_vars_pos <- c(
   "e9",
-  "population_total", "population_male", "population_female",
+  "population_total", "population_male", "population_female", "pop_65plus",
   "mig_total_in", "mig_total_out",
   "mig_within_sgg", "mig_within_sido_in", "mig_within_sido_out",
   "mig_inter_sido_in", "mig_inter_sido_out",
@@ -233,7 +294,8 @@ net_vars <- c("trade_balance", "mig_net")
 # 비율/구조/지수 → scale만
 ratio_vars <- c(
   grep("^ind_ratio_", names(dt_q), value = TRUE),
-  "sido_consumer_goods", "sido_capital_goods", "sido_intermediate_goods",
+  "sido_consumer_goods", "sido_capital_goods", "sido_intermediate_goods", "sex_ratio", "pop_65plus_ratio",
+  "grdp_1st", "grdp_2nd", "grdp_3rd",
   lf_rate_char
 )
 
