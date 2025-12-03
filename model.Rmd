@@ -589,7 +589,7 @@ dt_y <- dt_y %>%
 
 ```{r}
 dt_y <- dt_y %>%
-  filter(year <= 2024) %>%
+  filter(year <= 2021) %>%
   arrange(canon_group_id, date)
 ```
 
@@ -629,10 +629,17 @@ form_cov_y <- update(form_interaction_y, . ~ . +
                        pop_65plus_z +
                        trade_balance_z +
                        mig_total_out_z +
+                       # grdp_1st_z +
+                       # grdp_2nd_z +
+                       # grdp_3rd_z +
                        ind_ratio_manufacturing_z +
-                       ind_ratio_construction_z + 
+                       ind_ratio_construction_z +
                        ind_ratio_wholesale_retail_z +
-                       lf_employment_rate_15_64
+                       lf_employment_rate_15_64 +
+                       dummy_covid +
+                       dummy_capital +
+                       dummy_si +
+                       dummy_gun
                      )
 
 # 4) 적합 (E= 방식; offset 쓰지 않음)
@@ -653,9 +660,369 @@ summary(fit_cov_y)
 fit_cov_y$waic$waic; fit_cov_y$dic$dic
 ```
 ## Prediction
+### lagged cov.
 ```{r}
+library(dplyr)
+
+dt_y <- dt_y %>% 
+  arrange(space_id, year) %>%         # 1) 지역별·연도순 정렬
+  group_by(space_id) %>%              # 2) 시군구별로 묶고
+  mutate(
+    sex_ratio_l1         = lag(sex_ratio_z,         1),
+    pop_65plus_l1        = lag(pop_65plus_z,       1),
+    trade_balance_l1     = lag(trade_balance_z,    1),
+    mig_total_out_l1     = lag(mig_total_out_z,    1),
+    ind_manuf_l1         = lag(ind_ratio_manufacturing_z, 1),
+    ind_constr_l1        = lag(ind_ratio_construction_z,  1),
+    ind_wholesale_l1     = lag(ind_ratio_wholesale_retail_z, 1),
+    lf_emp_15_64_l1      = lag(lf_employment_rate_15_64, 1)
+  ) %>% 
+  ungroup()
 
 ```
+
+
+### test
+
+```{r}
+# 1) 마스킹 구간 정의
+mask_year <- 2023:2025
+
+# 2) 응답 변수 새로 하나 만들어서, 마스킹 연도는 NA로 처리
+dt_y$e9_obs <- dt_y$e9
+dt_y$e9_obs[dt_y$year %in% mask_year] <- NA
+
+
+# 3) 모델 적합 (학습 구간만 사용)
+form_interaction_y <- e9_obs ~ 1 +
+  # # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
+  f(space_id, model="bym2", graph=G, scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )) +
+  # 메인 시간효과
+  f(time_id_year, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    )) +
+  # 공간×시간 상호작용: BYM2를 시간별 복제, 시간 간 AR(1)로 연결
+  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+    group = time_id_year,
+    control.group = list(model="ar1",
+                         hyper = list(
+                           theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+                           rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+                         )),
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )
+  )
+
+# 3) 공변량 추가한 공식
+form_cov_y_lag <- update(
+  form_interaction_y, 
+  . ~ . +
+    sex_ratio_l1 +
+    pop_65plus_l1 +
+    trade_balance_l1 +
+    mig_total_out_l1 +
+    ind_manuf_l1 +
+    ind_constr_l1 +
+    ind_wholesale_l1 +
+    lf_emp_15_64_l1 +
+    # dummy_covid +
+    dummy_capital +
+    dummy_si +
+    dummy_gun
+)
+
+
+fit_cov_y_lag_mask <- inla(
+  formula = form_cov_y_lag,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$population_total,
+  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(link = 1, compute = TRUE),
+  control.inla      = list(strategy = "simplified.laplace",
+                           int.strategy = "auto",
+                           control.vb = list(emergency = 50))
+)
+
+
+# 마스킹 연도 인덱스
+idx_test <- which(dt_y$year %in% mask_year)
+
+# λ_hat: 포아송 평균 μ = E * exp(η) (결과가 이미 Expectation 스케일)
+lambda_hat <- fit_cov_y_lag_mask$summary.fitted.values$mean[idx_test]
+
+# 관측값 (원래 e9)
+observed <- dt_y$e9[idx_test]
+rmse <- sqrt(mean((observed - lambda_hat)^2, na.rm = TRUE))
+rmse
+
+```
+
+```{r}
+# 1) 마스킹 구간 정의
+mask_year <- 2023:2025
+
+# 2) 응답 변수 새로 하나 만들어서, 마스킹 연도는 NA로 처리
+dt_y$e9_obs <- dt_y$e9
+dt_y$e9_obs[dt_y$year %in% mask_year] <- NA
+
+
+# 3) 모델 적합 (학습 구간만 사용)
+form_y_ar1_nocov <- e9_obs ~ 1 +
+  f(space_id, model="bym2", graph=G, scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )) +
+  f(time_id_year, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    ))
+
+fit_nocov_y_mask <- inla(
+  formula = form_y_ar1_nocov,      # 기존 연도별 BYM2+AR1+공변량 모델
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$population_total,
+  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(link = 1, compute = TRUE),
+  control.inla      = list(strategy = "simplified.laplace",
+                           int.strategy = "auto",
+                           control.vb = list(emergency = 50)),
+  verbose = FALSE
+)
+
+# 마스킹 연도 인덱스
+idx_test <- which(dt_y$year %in% mask_year)
+
+# λ_hat: 포아송 평균 μ = E * exp(η) (결과가 이미 Expectation 스케일)
+lambda_hat <- fit_nocov_y_mask$summary.fitted.values$mean[idx_test]
+
+# 관측값 (원래 e9)
+observed <- dt_y$e9[idx_test]
+
+rmse <- sqrt(mean((observed - lambda_hat)^2, na.rm = TRUE))
+rmse
+```
+
+```{r}
+# 테스트 연도에서의 차이 요약
+summary(lambda_cov[idx_test] - lambda_nocov[idx_test])
+
+# 최대 차이
+max_diff <- max(abs(lambda_cov[idx_test] - lambda_nocov[idx_test]))
+max_diff
+
+head(cbind(
+  cov   = lambda_cov[idx_test],
+  nocov = lambda_nocov[idx_test]
+))
+
+```
+```{r}
+options(digits = 10)
+
+observed <- dt_y$e9[idx_test]
+
+rmse_cov   <- sqrt(mean((observed - lambda_cov[idx_test])^2,   na.rm = TRUE))
+rmse_nocov <- sqrt(mean((observed - lambda_nocov[idx_test])^2, na.rm = TRUE))
+
+rmse_cov
+rmse_nocov
+```
+```{r}
+summary(fit_cov_y_mask)$fixed
+```
+
+### yearly 대안 모형 예시
+
+```{r}
+# 0) OLS/공간회귀용 비율 변수
+dt_y_yearly <- dt_y %>%
+  mutate(
+    e9_rate = (e9 / population_total) * 1e5,  # 인구 10만 명당 비율
+    log_rate = log1p(e9_rate)
+  )
+
+# 1) Simple OLS (연도 고정효과 포함)
+ols_yearly <- lm(
+  log_rate ~ sex_ratio + pop_65plus_z + trade_balance_z + factor(year),
+  data = dt_y_yearly
+)
+summary(ols_yearly)
+
+# 2) Spatial lag model (SAR) on 로그 비율
+W_mat  <- INLA:::inla.graph2matrix(G)                 # INLA 그래프 → 인접행렬
+listw  <- spdep::mat2listw(as.matrix(W_mat), style="W")
+sar_fit <- spatialreg::lagsarlm(
+  log_rate ~ sex_ratio + pop_65plus_z + trade_balance_z,
+  data  = dt_y_yearly,
+  listw = listw,
+  method = "eigen"
+)
+summary(sar_fit)
+
+# 3) Bayesian Poisson (공변량 없이) + BYM2 + AR1
+form_y_ar1_nocov <- e9 ~ 1 +
+  f(space_id, model="bym2", graph=G, scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )) +
+  f(time_id_year, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    ))
+
+fit_y_ar1_nocov <- inla(
+  formula = form_y_ar1_nocov,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$population_total,
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           int.strategy = "auto",
+                           control.vb=list(emergency=50))
+)
+
+# 4) Bayesian Poisson (공변량 없이) + BYM2 + RW1
+form_y_rw1_nocov <- e9 ~ 1 +
+  f(space_id, model="bym2", graph=G, scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )) +
+  f(time_id_year, model="rw1",
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01))
+    ))
+
+fit_y_rw1_nocov <- inla(
+  formula = form_y_rw1_nocov,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$population_total,
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           int.strategy = "auto",
+                           control.vb=list(emergency=50))
+)
+```
+## Prediction
+```{r}
+# 연도별 hold-out 예측 비교 (예: 2023–2024 마스킹)
+# data.table을 쓸 때는 괄호를 반드시 넣어 `!(year %in% ...)` 형태로
+# 작성해야 lubridate::year() 등과 충돌하지 않고 "'match' requires vector arguments"
+# 오류를 피할 수 있습니다.
+mask_years <- 2023:2024
+
+# 0) 공통 데이터 준비
+# data.table 스타일로 바로 train/test를 나눌 경우 예시
+# (괄호를 써서 `!(year %in% mask_years)` 형태로 지정)
+# dt_y_dt   <- as.data.table(dt_y)
+# dt_train  <- dt_y_dt[!(year %in% mask_years)]
+# dt_test   <- dt_y_dt[ year %in% mask_years]
+dt_y_eval <- dt_y %>%
+  mutate(
+    is_holdout = year %in% mask_years,
+    e9_obs     = e9,
+    e9         = ifelse(is_holdout, NA, e9)  # hold-out 연도는 미관측 처리
+  )
+
+dt_y_eval_rates <- dt_y_eval %>%
+  mutate(
+    e9_rate = (e9_obs / population_total) * 1e5,
+    log_rate = log1p(e9_rate)
+  )
+
+train_years <- dt_y_eval_rates %>% filter(!is_holdout)
+test_years  <- dt_y_eval_rates %>% filter(is_holdout)
+
+calc_metrics <- function(obs, pred) {
+  tibble(
+    rmse = sqrt(mean((obs - pred)^2, na.rm = TRUE)),
+    mae  = mean(abs(obs - pred), na.rm = TRUE),
+    mape = mean(abs(obs - pred) / pmax(obs, 1), na.rm = TRUE)
+  )
+}
+
+# 1) OLS (연도 고정효과) → 로그비율 예측 후 카운트로 환산
+ols_holdout <- lm(
+  log_rate ~ sex_ratio + pop_65plus_z + trade_balance_z + factor(year),
+  data = train_years
+)
+
+ols_pred_log <- predict(ols_holdout, newdata = test_years)
+ols_pred_cnt <- (exp(ols_pred_log) - 1) * test_years$population_total / 1e5
+
+# 2) SAR (lagsarlm) → 로그비율 예측 후 카운트로 환산
+W_mat_eval <- INLA:::inla.graph2matrix(G)
+listw_eval <- spdep::mat2listw(as.matrix(W_mat_eval), style = "W")
+
+sar_holdout <- spatialreg::lagsarlm(
+  log_rate ~ sex_ratio + pop_65plus_z + trade_balance_z,
+  data  = train_years,
+  listw = listw_eval,
+  method = "eigen"
+)
+
+sar_pred_log <- predict(sar_holdout, newdata = test_years, listw = listw_eval)
+sar_pred_cnt <- (exp(sar_pred_log) - 1) * test_years$population_total / 1e5
+
+# 3) Bayesian Poisson + BYM2 + AR1 (공변량 없음, hold-out 연도 미관측)
+fit_y_ar1_hold <- inla(
+  formula = form_y_ar1_nocov,
+  data    = dt_y_eval,
+  family  = "poisson",
+  E       = dt_y_eval$population_total,
+  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(link = 1, compute = TRUE),
+  control.inla      = list(strategy = "simplified.laplace",
+                           int.strategy = "auto",
+                           control.vb = list(emergency = 50))
+)
+
+ar1_pred_cnt <- fit_y_ar1_hold$summary.fitted.values$mean[dt_y_eval$is_holdout]
+
+# 4) Bayesian Poisson + BYM2 + RW1 (공변량 없음, hold-out 연도 미관측)
+fit_y_rw1_hold <- inla(
+  formula = form_y_rw1_nocov,
+  data    = dt_y_eval,
+  family  = "poisson",
+  E       = dt_y_eval$population_total,
+  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(link = 1, compute = TRUE),
+  control.inla      = list(strategy = "simplified.laplace",
+                           int.strategy = "auto",
+                           control.vb = list(emergency = 50))
+)
+
+rw1_pred_cnt <- fit_y_rw1_hold$summary.fitted.values$mean[dt_y_eval$is_holdout]
+
+# hold-out 평가 지표 비교
+obs_cnt <- test_years$e9_obs
+
+bind_rows(
+  calc_metrics(obs_cnt, ols_pred_cnt)  %>% mutate(model = "OLS (log_rate)"),
+  calc_metrics(obs_cnt, sar_pred_cnt)  %>% mutate(model = "SAR (log_rate)"),
+  calc_metrics(obs_cnt, ar1_pred_cnt)  %>% mutate(model = "BYM2 + AR1 (no cov)"),
+  calc_metrics(obs_cnt, rw1_pred_cnt)  %>% mutate(model = "BYM2 + RW1 (no cov)")
+) %>%
+  relocate(model)
+```
+
 
 
 ## Sido + Sigungu
