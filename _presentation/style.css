@@ -18,3 +18,14 @@ h1, h2, h3, p, li {
 .date {
   font-size: 30px;
 }
+
+/* 인쇄(PDF 저장) 시에만 적용되는 스타일 */
+@media print {
+    /* 스크롤이 적용된 특정 클래스나 태그를 타겟팅하세요 */
+    .your-scroll-container, pre, code {
+        height: auto !important;      /* 고정 높이 해제 */
+        max-height: none !important;  /* 최대 높이 제한 해제 */
+        overflow: visible !important; /* 스크롤바 없애고 내용 다 보여주기 */
+        display: block !important;    /* 필요한 경우 블록 요소로 강제 */
+    }
+}
