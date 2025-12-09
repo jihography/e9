@@ -1,0 +1,20 @@
+h1, h2, h3, p, li {
+  word-break: keep-all; /* 단어 단위로 줄바꿈 (한글 가독성 필수) */
+}
+
+.reveal h1 {
+  font-size: 2.5em; /* 제목 폰트 크기를 조금 줄임 (기본값은 너무 큼) */
+  line-height: 1.3; /* 줄 간격 조정 */
+}
+
+.title {
+  font-size: 90px !important;
+}
+
+.quarto-title-author-name {
+  font-size: 50px;
+}
+
+.date {
+  font-size: 30px;
+}

@@ -31,12 +31,17 @@ library(stringr)
 library(sf)
 library(spdep)
 library(Matrix)
+library(ggplot2)
+library(rlang)
+```
 
+
+```{r, message=FALSE}
 # added by IS
 inla.setOption(inla.mode = "experimental")
 
 # 경로: 파일을 알맞게 지정하세요
-path <- "panel_full_9.csv"
+path <- "panel_full_12.csv"
 
 dt <- fread(path, encoding = "UTF-8")
 
@@ -59,7 +64,8 @@ sgg <- st_make_valid(sgg)
 
 sgg <- sgg |>
   arrange(new_sigungu_cd) |>
-  mutate(idx = row_number())
+  mutate(idx = row_number()) |>
+  filter(!new_sigungu_nm == '세종시')
 ```
 
 ```{r}
@@ -95,11 +101,29 @@ dt <- dt %>%
 dt <- dt %>%
   filter(canon_sigungu_name != '세종시')
 
+# 정읍시 수정
+idx <- with(
+  dt,
+  canon_group_id == "전북특별자치도::정읍시" &
+    yyyymm == 202403
+)
+
+dt$e9[idx] <- 1107
+
+# RR 계산
+dt$E_e9 <- dt$population_total * (sum(dt$e9) / sum(dt$population_total))
+dt$RR <- dt$e9 / dt$E_e9
+
 # 성비 계산
 dt <- dt %>%
-  mutate(sex_ratio = as.numeric(population_male / population_female),
-         pop_65plus_ratio = as.numeric(pop_65plus / population_total))
+  mutate(sex_ratio = as.numeric(100 * population_male / population_female),
+         pop_65plus_ratio = as.numeric(100 * pop_65plus / population_total))
 
+# MEI 계산
+dt <- dt %>%
+  mutate(mei = as.numeric(mig_net / (mig_total_in + mig_total_out)))
+
+# 1,2,3차 산업별 grdp 비중
 dt <- dt %>% 
   mutate(
     denom   = coalesce(gdp_curr_gdp_total, 0),
@@ -119,6 +143,20 @@ dt <- dt %>%
     grdp_3rd = 1 - grdp_1st - grdp_2nd
   ) %>% 
   select(-denom)
+
+# 해당 시점 전국 평균 대비
+dt <- dt %>% 
+  group_by(yq) %>%
+  mutate(
+    grdp_1st_nat = mean(grdp_1st, na.rm = TRUE),
+    grdp_2nd_nat = mean(grdp_2nd, na.rm = TRUE),
+    grdp_3rd_nat = mean(grdp_3rd, na.rm = TRUE),
+
+    grdp_1st_dev = grdp_1st - grdp_1st_nat,
+    grdp_2nd_dev = grdp_2nd - grdp_2nd_nat,
+    grdp_3rd_dev = grdp_3rd - grdp_3rd_nat
+  ) %>% 
+  ungroup()
 
 # 필요 더미 추가
 covid_start <- 202003L   # 필요하면 여기서 조정
@@ -280,10 +318,14 @@ count_vars_pos <- c(
   "trade_export_val", "trade_import_val",
   # GDP 관련
   grep("^gdp_curr_", names(dt_q), value = TRUE),
+  "lf_pop_15plus_thousand", "lf_econ_active_thousand", 
+  "lf_employed_thousand", "lf_unemployed_thousand",
+  "lf_inactive_thousand",
   # 시도 일자리 규모
   "sido_num_job_offers", "sido_num_hires",
   "sido_num_unfilled", "sido_num_current_workers",
   "sido_num_shortage", "sido_num_planned_hires",
+  "indpark_area_mgmt",
   # 노동력(천명)
   lf_count_char
 )
@@ -295,7 +337,9 @@ net_vars <- c("trade_balance", "mig_net")
 ratio_vars <- c(
   grep("^ind_ratio_", names(dt_q), value = TRUE),
   "sido_consumer_goods", "sido_capital_goods", "sido_intermediate_goods", "sex_ratio", "pop_65plus_ratio",
-  "grdp_1st", "grdp_2nd", "grdp_3rd",
+  "grdp_1st", "grdp_2nd", "grdp_3rd", 
+  "lf_participation_rate", "lf_employment_rate", "lf_employment_rate_15_64", "lf_unemployment_rate",
+  "indpark_area_mgmt", "mei", "grdp_1st_dev", "grdp_2nd_dev", "grdp_3rd_dev",
   lf_rate_char
 )
 
@@ -351,7 +395,7 @@ dt_y <- dt_q %>%
   slice_tail(n = 1) %>%   # 각 연도에서 마지막 분기(Q4)만 남김
   ungroup() %>%
   # (선택) 연도용 time_id_year 생성
-  mutate(
+  dplyr::mutate(
     time_id_year = as.integer(factor(year))
   )
 
@@ -372,7 +416,137 @@ write.csv(dt_y, 'dt_y_mod.csv', row.names = FALSE, fileEncoding = "euc-kr")
 
 
 ## EDA
+### sgg_map
+```{r}
+plot_sgg_var <- function(dt,
+                         sgg,
+                         var,                 # fill에 쓸 변수 (비율, 인구 등)
+                         time_value = NULL,   # 시점 (NULL이면 마지막 시점)
+                         low  = "grey95",
+                         high = "steelblue",
+                         fill_label = NULL,
+                         base_size = 24,      # 글자 크기 기본값
+                         width = 6, height = 5, dpi = 300) {
 
+  var_quo <- enquo(var)
+
+  # 1) time_value 미지정 시, 마지막 time_id 사용 (지금은 202506으로 고정)
+  if (is.null(time_value)) {
+    time_value <- dt %>% summarise(last = 202506) %>% pull(last)
+  }
+
+  # 2) 해당 시점 데이터만 필터
+  dt_time <- dt %>% dplyr::filter(yyyymm == time_value)
+
+  # 3) 시군구 shp와 조인 (idx = space_id 기준)
+  sgg_map <- sgg %>%
+    dplyr::left_join(dt_time, by = c("idx" = "space_id"))
+
+  # 4) fill 라벨 기본값
+  if (is.null(fill_label)) {
+    fill_label <- as_name(var_quo)
+  }
+
+  # 5) 지도 플롯 객체 만들기
+  p <- ggplot(sgg_map) +
+    geom_sf(aes(fill = !!var_quo), color = "grey70", linewidth = 0.1) +
+    scale_fill_gradient(
+      low  = low,
+      high = high
+    ) +
+    labs(
+      title = paste0(fill_label, " (yyyymm = ", time_value, ")"),
+      fill  = fill_label
+    ) +
+    theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      legend.title = element_text(face = "bold")
+    )
+
+  # 6) 파일 이름: 변수이름_시점.png
+  file_stem <- paste0(fill_label, "_", time_value)
+  file_stem_safe <- gsub("[^[:alnum:]가-힣]+", "_", file_stem)
+  file_name <- paste0("_fig/", file_stem_safe, ".png")
+
+  ggsave(filename = file_name, plot = p,
+         width = width, height = height, dpi = dpi)
+  message("Saved plot to: ", file_name)
+
+  return(p)
+}
+```
+
+```{r}
+plot_sgg_var(dt_q, sgg, var = grdp_1st_dev, time_value = 201312)
+```
+```{r}
+plot_sgg_var(dt_q, sgg, var = e9)
+plot_sgg_var(dt_q, sgg, var = e9_1)
+plot_sgg_var(dt_q, sgg, var = e9_2)
+plot_sgg_var(dt_q, sgg, var = RR)
+
+```
+```{r}
+top10_regions <- dt_y %>%
+  filter(yyyymm == 202112) %>%           # 2025년 6월 데이터만 필터링
+  arrange(desc(RR)) %>%                  # RR 내림차순 정렬 (높은 순)
+  select(canon_sigungu_name, RR, e9, E_e9) %>% # 지역명, RR, 관측값, 기대값 확인
+  head(10)                               # 상위 10개 추출
+
+# 결과 출력
+print(top10_regions)
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 1. 100개 시군구 랜덤 추출 (Sampling)
+set.seed(123) # 재현성을 위해 시드 고정
+all_sigungu <- unique(dt_q$sgg_code10) # 시군구 코드 (또는 sig_kor_nm)
+sampled_sigungu <- sample(all_sigungu, 100)
+
+# 2. 추출된 시군구 데이터만 필터링
+subset_data <- dt_q %>%
+  filter(sgg_code10 %in% sampled_sigungu) 
+  # 만약 dt_q에 RR 컬럼이 없고 계산해야 한다면 아래 주석 해제
+  # mutate(RR = y / E) # E는 기대빈도
+
+# 3. x축 라벨을 위한 보조 데이터 (중복 제거)
+# time_id와 라벨(yq) 매핑용
+time_labels <- dt_q %>% 
+  select(time_id, yq) %>% 
+  distinct() %>% 
+  arrange(time_id)
+
+# 4. 시각화 (Spaghetti Plot)
+ggplot(subset_data, aes(x = time_id, y = RR, group = sgg_code10)) +
+  # (1) 개별 시군구의 선 그리기 (투명도 조절 필수)
+  geom_line(alpha = 0.3, color = "steelblue") + 
+  
+  # (2) 전체 평균 추세선 추가 (선택 사항: 전체 흐름 비교용)
+  geom_smooth(aes(group = 1), method = "loess", color = "red", se = FALSE, size = 1.2) +
+  
+  # (3) 축 및 테마 설정
+  scale_x_continuous(
+    breaks = time_labels$time_id[seq(1, nrow(time_labels), by = 2)], # 라벨이 너무 많으면 2칸씩 띄움
+    labels = time_labels$yq[seq(1, nrow(time_labels), by = 2)]
+  ) +
+  # y축을 로그 스케일로 보면 변동폭 확인이 더 용이함 (필요시 주석 해제)
+  # scale_y_log10() + 
+  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  
+  labs(
+    title = "Relative Risk (RR) Trends of 100 Randomly Selected Regions",
+    subtitle = "Blue lines: Individual regions, Red line: Smoothed average trend",
+    x = NULL, 
+    y = "Relative Risk (RR)"
+  )
+```
+
+### misc.
 ```{r}
 dt_q %>% 
   summarise(
@@ -392,7 +566,7 @@ ggplot(dt_q, aes(e9)) +
 
 ```{r}
 agg_time <- dt_q %>% 
-  group_by(time_id, tq_lab) %>%    # tq_lab: "2013Q1" 같은 라벨 있다고 가정
+  group_by(time_id, yq) %>%    # tq_lab: "2013Q1" 같은 라벨 있다고 가정
   summarise(
     y   = sum(e9),
     pop = sum(population_total),
@@ -475,6 +649,7 @@ adf.test(ts_diff,
 plot(ts_diff, type='l')
 ```
 
+
 ```{r}
 # 1) rate 계산
 dt_q <- dt_q %>% 
@@ -498,26 +673,26 @@ sgg_map <- sgg %>%
   left_join(dt_last, by = "new_sigungu_cd")
 
 ggplot(sgg_map) +
-  geom_sf(aes(fill = rate), color = "grey70", linewidth = 0.1) +
+  geom_sf(aes(fill = lf_pop_15plus_thousand), color = "grey70", linewidth = 0.1) +
   scale_fill_gradient(
-    name = "rate",
+    # name = "rate",
     low  = "grey95",   # 낮은 값: 거의 흰색
     high = "steelblue" # 높은 값: 진한 파랑
   ) +
-  labs(
-    title = paste0("Crude rate of E9 (time_id = ", last_time, ")")
-  ) +
+  # labs(
+  #   title = paste0("Crude rate of E9 (time_id = ", last_time, ")")
+  # ) +
   theme_minimal()
 
 # 5) log(rate) 지도 (범위 더 안정적)
-ggplot(sgg_map) +
-  geom_sf(aes(fill = log_rate), color = "grey70", linewidth = 0.1) +
-  scale_fill_viridis_c(option = "plasma") +
-  labs(
-    title = paste0("log(rate) of E9 (time_id = ", last_time, ")"),
-    fill  = "log(rate)"
-  ) +
-  theme_minimal()
+# ggplot(sgg_map) +
+#   geom_sf(aes(fill = log_rate), color = "grey70", linewidth = 0.1) +
+#   scale_fill_viridis_c(option = "plasma") +
+#   labs(
+#     title = paste0("log(rate) of E9 (time_id = ", last_time, ")"),
+#     fill  = "log(rate)"
+#   ) +
+#   theme_minimal()
 
 ```
 
@@ -527,7 +702,7 @@ dt_last <- dt_q %>% filter(time_id == last_time)
 
 # 비공간 Poisson GLM (offset 포함, covariate는 필요에 따라 추가)
 m0 <- glm(
-  e9 ~ 1 + lnx + lnm,            # covariate 추가 (예시)
+  e9 ~ 1 + mig_net_z,            # covariate 추가 (예시)
   family = poisson,
   offset = log_pop_off,
   data   = dt_last
@@ -556,10 +731,13 @@ ggplot(sgg_resid) +
   ) +
   theme_minimal()
 
+W_mat  <- INLA:::inla.graph2matrix(G)
+listw  <- spdep::mat2listw(as.matrix(W_mat), style="W")
+
 # Moran's I of residuals
 mi_resid <- moran.test(
   sgg_resid$resid_pearson,
-  listw = lw,
+  listw = listw,
   zero.policy = TRUE
 )
 

@@ -1,0 +1,1573 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<script src="e9_presentation_files/libs/clipboard/clipboard.min.js"></script>
+<script src="e9_presentation_files/libs/quarto-html/tabby.min.js"></script>
+<script src="e9_presentation_files/libs/quarto-html/popper.min.js"></script>
+<script src="e9_presentation_files/libs/quarto-html/tippy.umd.min.js"></script>
+<link href="e9_presentation_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="e9_presentation_files/libs/quarto-html/light-border.css" rel="stylesheet">
+<link href="e9_presentation_files/libs/quarto-html/quarto-syntax-highlighting-587c61ba64f3a5504c4d52d930310e48.css" rel="stylesheet" id="quarto-text-highlighting-styles"><meta charset="utf-8">
+  <meta name="generator" content="quarto-1.8.26">
+
+  <meta name="author" content="지리학과, 2020-17530, 곽지호">
+  <meta name="dcterms.date" content="2025-12-10">
+  <title>시공간 베이지안 계층 모형을 이용한 고용허가제(E-9) 외국인 근로자 패널 자료 분석</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, minimal-ui">
+  <link rel="stylesheet" href="e9_presentation_files/libs/revealjs/dist/reset.css">
+  <link rel="stylesheet" href="e9_presentation_files/libs/revealjs/dist/reveal.css">
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="e9_presentation_files/libs/revealjs/dist/theme/quarto-0fde88a82f0356838740f155f1088782.css">
+  <link rel="stylesheet" href="style.css">
+  <link href="e9_presentation_files/libs/revealjs/plugin/quarto-line-highlight/line-highlight.css" rel="stylesheet">
+  <link href="e9_presentation_files/libs/revealjs/plugin/reveal-menu/menu.css" rel="stylesheet">
+  <link href="e9_presentation_files/libs/revealjs/plugin/reveal-menu/quarto-menu.css" rel="stylesheet">
+  <link href="e9_presentation_files/libs/revealjs/plugin/quarto-support/footer.css" rel="stylesheet">
+  <style type="text/css">
+    .reveal div.sourceCode {
+      margin: 0;
+      overflow: auto;
+    }
+    .reveal div.hanging-indent {
+      margin-left: 1em;
+      text-indent: -1em;
+    }
+    .reveal .slide:not(.center) {
+      height: 100%;
+      overflow-y: auto;
+    }
+    .reveal .slide.scrollable {
+      overflow-y: auto;
+    }
+    .reveal .footnotes {
+      height: 100%;
+      overflow-y: auto;
+    }
+    .reveal .slide .absolute {
+      position: absolute;
+      display: block;
+    }
+    .reveal .footnotes ol {
+      counter-reset: ol;
+      list-style-type: none; 
+      margin-left: 0;
+    }
+    .reveal .footnotes ol li:before {
+      counter-increment: ol;
+      content: counter(ol) ". "; 
+    }
+    .reveal .footnotes ol li > p:first-child {
+      display: inline-block;
+    }
+    .reveal .slide ul,
+    .reveal .slide ol {
+      margin-bottom: 0.5em;
+    }
+    .reveal .slide ul li,
+    .reveal .slide ol li {
+      margin-top: 0.4em;
+      margin-bottom: 0.2em;
+    }
+    .reveal .slide ul[role="tablist"] li {
+      margin-bottom: 0;
+    }
+    .reveal .slide ul li > *:first-child,
+    .reveal .slide ol li > *:first-child {
+      margin-block-start: 0;
+    }
+    .reveal .slide ul li > *:last-child,
+    .reveal .slide ol li > *:last-child {
+      margin-block-end: 0;
+    }
+    .reveal .slide .columns:nth-child(3) {
+      margin-block-start: 0.8em;
+    }
+    .reveal blockquote {
+      box-shadow: none;
+    }
+    .reveal .tippy-content>* {
+      margin-top: 0.2em;
+      margin-bottom: 0.7em;
+    }
+    .reveal .tippy-content>*:last-child {
+      margin-bottom: 0.2em;
+    }
+    .reveal .slide > img.stretch.quarto-figure-center,
+    .reveal .slide > img.r-stretch.quarto-figure-center {
+      display: block;
+      margin-left: auto;
+      margin-right: auto; 
+    }
+    .reveal .slide > img.stretch.quarto-figure-left,
+    .reveal .slide > img.r-stretch.quarto-figure-left  {
+      display: block;
+      margin-left: 0;
+      margin-right: auto; 
+    }
+    .reveal .slide > img.stretch.quarto-figure-right,
+    .reveal .slide > img.r-stretch.quarto-figure-right  {
+      display: block;
+      margin-left: auto;
+      margin-right: 0; 
+    }
+  </style>
+</head>
+<body class="quarto-light">
+  <div class="reveal">
+    <div class="slides">
+
+<section id="title-slide" data-state="hide-footer" class="quarto-title-block center">
+  <h1 class="title"><p>시공간 베이지안 계층 모형을 이용한 고용허가제(E-9) 외국인 근로자 패널 자료 분석</p></h1>
+  <p class="subtitle">&lt;공간정보분석 3: 시공간 데이터사이언스&gt; 프로젝트 결과 발표</p>
+
+<div class="quarto-title-authors">
+<div class="quarto-title-author">
+<div class="quarto-title-author-name">
+지리학과, 2020-17530, 곽지호 
+</div>
+</div>
+</div>
+
+  <p class="date">2025-12-10</p>
+</section>
+<section>
+<section id="연구-배경-및-목적" class="title-slide slide level1 center">
+<h1>1. 연구 배경 및 목적</h1>
+
+</section>
+<section id="연구-배경" class="slide level2">
+<h2>연구 배경</h2>
+<div class="fragment" data-fragment-index="1">
+<ul>
+<li><p>국내 체류 외국인 약 <strong>156만 명</strong> 중 E-9(비전문취업) 비자가 <strong>가장 높은 비중</strong> 차지 (약 <strong>33만 명</strong>)</p>
+<ul>
+<li>i.e.&nbsp;“고용허가제”: 내국인을 고용하지 못한 중소 사업장을 대상으로 함</li>
+</ul></li>
+</ul>
+</div>
+<div class="fragment" data-fragment-index="2">
+<ul>
+<li><p>공간적 문제: 인구 감소 및 고령화 위기 → 단순 노동 분야 외국인력 수급의 중요성</p>
+<ul>
+<li><p><strong>인구구조 변동에 따른 지역 격차의 다층성</strong></p></li>
+<li><p>비수도권에서의 인력 수급 상대적으로 어려움</p></li>
+<li><p>지역특화형 비자를 확대하는 등의 정책적 노력 진행 중</p></li>
+</ul></li>
+</ul>
+</div>
+<div class="r-stack">
+<p><img data-src="images/paste-5.png" class="fragment" data-fragment-index="3" width="800"></p>
+<p><img data-src="images/paste-6.png" class="fragment" data-fragment-index="4" width="800"></p>
+</div>
+</section>
+<section id="연구-배경-1" class="slide level2">
+<h2>연구 배경</h2>
+<ul>
+<li><p>문제 상황:</p>
+<ul>
+<li><p>지자체별 특성에 맞는 <strong>등록외국인 관리 전략 부족</strong></p></li>
+<li><p><strong>시군구 단위의 실증적 데이터와 분석</strong>이 매우 제한적</p></li>
+</ul></li>
+</ul>
+
+<img data-src="images/paste-4.png" class="r-stretch"></section>
+<section id="연구-목적" class="slide level2 scrollable">
+<h2>연구 목적</h2>
+<div class="fragment" data-fragment-index="1">
+<ul>
+<li>시군구별 E-9 비자 등록인원 (stock) 변동 요인 규명 (+ 예측 모형 개발)
+<ul>
+<li><strong>2013~2025년 패널 자료</strong>를 이용한 시공간 분석</li>
+<li>시공간 베이지안 계층 모형의 활용</li>
+</ul></li>
+</ul>
+</div>
+<div class="fragment" data-fragment-index="2">
+<div class="callout callout-note callout-titled callout-style-default">
+<div class="callout-body">
+<div class="callout-title">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<p><strong>핵심 연구 질문 (RQ)</strong></p>
+</div>
+<div class="callout-content">
+<ol type="1">
+<li>시공간 베이지안 계층 모형의 <strong>설명력</strong>은 어느 정도인가?</li>
+<li>어떤 <strong>지역별/산업별 요인</strong>이 (세부자격별) E-9 비자 등록인원 분포에 유의한 영향을 미치는가?
+<ul>
+<li><p>(인구) <strong>성비</strong>(남초)가 높을수록, <strong>고령층 비율</strong>이 높을수록, <strong>인구 유출</strong>이 높을수록 E-9 발생률이 높을 것이다.</p></li>
+<li><p>(거시경제) 경기 상황을 나타내는 <strong>무역수지</strong> 등과 E-9 발생률 간에는 관계가 적을 것이다.</p></li>
+<li><p>(산업) <strong>제조업 비중</strong>이 높은 시군구일수록 E-9 발생률이 높을 것이다.</p></li>
+<li><p>(지역) 비수도권에 비해 <strong>수도권</strong> 지역의 E-9 발생률이 높을 것이다.</p></li>
+</ul></li>
+<li>(<strong>인구 구조의 역동성</strong>에 따라 향후 E-9 비자 등록인원 공간 분포는 어떻게 변화하는가?)</li>
+</ol>
+</div>
+</div>
+</div>
+</div>
+</section></section>
+<section>
+<section id="데이터-구축" class="title-slide slide level1 center">
+<h1>2. 데이터 구축</h1>
+
+</section>
+<section id="분석-기간-및-대상" class="slide level2">
+<h2>분석 기간 및 대상</h2>
+<ul>
+<li><strong>기간</strong>: 2013년 1분기 ~ 2025년 2분기 (총 13개년, 50개 분기)</li>
+</ul>
+<div class="fragment">
+<ul>
+<li><strong>공간</strong>: 전국 <strong>228개 시군구</strong> (비자치구 통합, 세종시 제외)
+<ul>
+<li>총 관측지: 228 × 50 = <strong>11,400개 패널 관측지</strong></li>
+<li>세부자격별(제조업, 건설업, 농업, 어업, 임업, …) E-9 데이터도 구득 가능</li>
+</ul></li>
+</ul>
+</div>
+<div class="fragment">
+<ul>
+<li><strong>출처</strong>
+<ul>
+<li>법무부 통계월보</li>
+<li>통계청 인구동향조사, 지역별 고용조사, …</li>
+<li>MDIS 직종별사업체노동력조사 등 기타 통계 자료</li>
+</ul></li>
+</ul>
+</div>
+</section>
+<section id="주요-공변량-목록" class="slide level2">
+<h2>주요 공변량 목록</h2>
+<table class="caption-top">
+<colgroup>
+<col style="width: 26%">
+<col style="width: 40%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>구분</th>
+<th>변수명</th>
+<th>시공간 해상도</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>인구 구조</td>
+<td>성비, 연령층별 인구, MEI 등</td>
+<td>시군구 × 분기</td>
+</tr>
+<tr class="even">
+<td>경제</td>
+<td>수출입액, 무역수지, 경제활동인구</td>
+<td>시군구 × 분기/반기</td>
+</tr>
+<tr class="odd">
+<td>산업 구조</td>
+<td>산업별 종사자 수 비중, GRDP 비중</td>
+<td>시군구 × 반기/년</td>
+</tr>
+<tr class="even">
+<td>더미</td>
+<td>수도권/비수도권, 시/군/구, 코로나19, 산업단지 유무</td>
+<td>시군구 × 분기</td>
+</tr>
+<tr class="odd">
+<td>기타 (시도 수준)</td>
+<td>부족인원, 제조업생산지수 등</td>
+<td>시도 × 분기/년</td>
+</tr>
+</tbody>
+</table>
+<div class="callout callout-important callout-titled callout-style-default">
+<div class="callout-body">
+<div class="callout-title">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<p><strong>Important</strong></p>
+</div>
+<div class="callout-content">
+<p><strong>주요 난점 1</strong></p>
+<ul>
+<li><p>분석 기간 내 행정구역 변동 → (1) matching table 구성 (2) 최신 행정구역을 기준으로 병합/연결 진행</p>
+<ul>
+<li><p>명칭 변동: 당진, 여주, 포천, 인천 남구 등</p></li>
+<li><p>행정구역 통합: 청주-청원, 마산-진해-창원</p></li>
+</ul></li>
+<li><p>데이터 원천별 코드 불일치 (행정구역, 산업, …) → 코드 연계표 활용</p></li>
+</ul>
+</div>
+</div>
+</div>
+</section></section>
+<section>
+<section id="연구-방법론" class="title-slide slide level1 center">
+<h1>3. 연구 방법론</h1>
+
+</section>
+<section id="시공간-베이지안-계층-모형-spatio-temporal-bayesian-hierarchical-model" class="slide level2">
+<h2>시공간 베이지안 계층 모형 (Spatio-Temporal Bayesian Hierarchical Model)</h2>
+<ul>
+<li>(Data Level) 종속변수 <span class="math inline">\(y_{i,t}\)</span>가 포아송 분포를 따른다고 가정:</li>
+</ul>
+<p><span class="math display">\[
+y_{i,t} \mid \lambda_{i,t} \sim \text{Poisson}(E_{i,t}\lambda_{i,t})
+\]</span></p>
+<ul>
+<li>(Process Level) 로그 선형 모형:</li>
+</ul>
+<p><span class="math display">\[
+\log \lambda_{i,t} = \alpha + x_{i,t}'\beta + u_{i,t} + \eta_t
+\]</span></p>
+<ul>
+<li>(Hyperparameter Level) Latent Spatio-Temporal Field</li>
+</ul>
+<p><span class="math display">\[
+\begin{align}
+u_{i,t} = \rho_u u_{i, t-1} + \epsilon_{i, t} \\
+\epsilon_{i,t} \sim \text{BYM2}(W, \tau_u, \phi), \\ \eta_t \sim \text{AR(1)}(\rho_\eta, \tau_\eta)
+\end{align}
+\]</span></p>
+<ul>
+<li><p>Priors: <span class="math inline">\(\tau_n, \phi, \tau_\eta, \rho_u, \rho_\eta\)</span></p></li>
+<li><p>사후분포:</p></li>
+</ul>
+<p><span class="math display">\[
+\pi(\mathbf{x}, {\theta} \mid \mathbf{y}) \propto \underbrace{\pi(\mathbf{y} \mid \mathbf{x}, {\theta})}_{\text{Likelihood}} \times \underbrace{\pi(\mathbf{x} \mid {\theta})}_{\text{Latent Field}} \times \underbrace{\pi({\theta})}_{\text{Hyperpriors}}
+\]</span></p>
+</section>
+<section id="시공간-베이지안-계층-모형-spatio-temporal-bayesian-hierarchical-model-1" class="slide level2">
+<h2>시공간 베이지안 계층 모형 (Spatio-Temporal Bayesian Hierarchical Model)</h2>
+<ul>
+<li><p>해석 방법:</p>
+<ul>
+<li><p><span class="math inline">\(E_{i, t}\)</span>(offset) 설정에 따른 <span class="math inline">\(\lambda_{i,t}\)</span>(rate)해석의 차이:</p>
+<ul>
+<li><p><strong>인구 수</strong>: “지역 내 E-9 외국인 근로자가 얼마나 많은가?”</p></li>
+<li><p><strong>전체 종사자 수</strong>: “지역 노동력 중 E-9 외국인 근로자가 차지하는 비중은 얼마인가?” ✅</p></li>
+</ul></li>
+<li><p><span class="math inline">\(\beta\)</span>의 해석: 승법적 효과 (Multiplicative Effect)</p>
+<ul>
+<li><p>로그 연결 함수를 이용</p></li>
+<li><p>변수 <span class="math inline">\(x\)</span>가 1단위 증가할 때, 유입률(Rate)는 <span class="math inline">\(\exp(\beta)\)</span>배 증가</p></li>
+</ul></li>
+</ul></li>
+</ul>
+<div class="fragment">
+<ul>
+<li><p>사후분포의 추정: INLA</p>
+<ul>
+<li><p><strong>I</strong>ntegrated <strong>N</strong>ested <strong>L</strong>aplace <strong>A</strong>pproximations</p>
+<ul>
+<li><p>MCMC 대비 연산 속도가 빠름 (복잡한 시공간 모형에서 널리 활용)</p></li>
+<li><p>R의 <code>INLA</code> 패키지 이용</p></li>
+</ul></li>
+</ul></li>
+</ul>
+</div>
+</section>
+<section id="시공간-베이지안-계층-모형-spatio-temporal-bayesian-hierarchical-model-2" class="slide level2">
+<h2>시공간 베이지안 계층 모형 (Spatio-Temporal Bayesian Hierarchical Model)</h2>
+<p>무엇이 “시공간적”인가?</p>
+<p><span class="math display">\[
+\log \lambda_{i,t} = \alpha + x_{i,t}'\beta + u_{i,t} + \eta_t
+\]</span></p>
+<div class="fragment">
+<ul>
+<li><span class="math inline">\(x_{i,t}\beta\)</span><strong>: 고정 효과 (Fixed Effects)</strong>
+<ul>
+<li>인구, 경제 지표 등 설명변수</li>
+<li>Spatially Varing Coefficient (SVC): <span class="math inline">\(\beta(s_i) = \beta + b_i\)</span></li>
+</ul></li>
+</ul>
+</div>
+<div class="fragment">
+<ul>
+<li><span class="math inline">\(u_{i,t}\)</span>: <strong>시공간 랜덤 효과 (Random Effects)</strong>
+<ul>
+<li>BYM2 공간 구조 <span class="math inline">\(\times\)</span> AR(1) 시간 구조</li>
+<li><span class="math inline">\(u_{i,t} = \rho u_{i,t-1} + \epsilon_{i,t}\)</span>
+<ul>
+<li><span class="math inline">\(\epsilon_{i,t} \sim \text{BYM2}(W, \tau_u, \phi)\)</span> (공간적 자기상관 반영)</li>
+</ul></li>
+</ul></li>
+</ul>
+</div>
+<div class="fragment">
+<ul>
+<li><span class="math inline">\(\eta_{t(i)}\)</span>: <strong>전역적 시간/공간 추세 (Global Trend)</strong></li>
+</ul>
+</div>
+</section></section>
+<section>
+<section id="탐색적-데이터-분석-eda" class="title-slide slide level1 center">
+<h1>4. 탐색적 데이터 분석 (EDA)</h1>
+
+</section>
+<section class="slide level2">
+
+<div class="columns">
+<h3 id="시계열-추세">시계열 추세</h3>
+<div class="column" style="width:50%;">
+<ul>
+<li>2013년 이후 <strong>완만한 증가</strong></li>
+<li><strong>코로나19 시기(2020~2022)</strong> 일시적 감소</li>
+<li>2022년 이후 <strong>급격한 회복</strong></li>
+<li>ACF/PACF 분석 결과<br>
+→ <strong>AR(1) 과정</strong>이 지배적인 패턴</li>
+</ul>
+</div><div class="column" style="width:50%;">
+<!-- 시계열 그래프 삽입 -->
+<p><img data-src="images/paste-7.png"></p>
+<p><img data-src="images/paste-8.png"></p>
+</div></div>
+</section>
+<section class="slide level2">
+
+<div class="columns">
+<h3 id="공간적-분포">공간적 분포</h3>
+<div class="column" style="width:50%;">
+<ul>
+<li><strong>수도권</strong>, <strong>충남</strong>, <strong>호남/영남 산업단지</strong> 중심으로<br>
+E-9 외국인 근로자 고밀도 분포</li>
+<li>Moran’s I 검정 결과
+<ul>
+<li>유의한 <strong>양의 공간적 자기상관</strong> 확인</li>
+</ul></li>
+</ul>
+</div><div class="column" style="width:50%;">
+<!-- 공간 분포 지도 삽입 -->
+<p><img data-src="images/e9_202506-3.png"></p>
+<!-- ![](figs/map_e9.png){width=100%} -->
+</div></div>
+</section>
+<section class="slide level2">
+
+<div class="columns">
+<h3 id="공간적-분포-1">공간적 분포</h3>
+<div class="column" style="width:50%;">
+<ul>
+<li>(총인구 기준) RR 상위 5개 시군구 (202506):<br>
+음성군, 포천시, 영암군, 완도군, 고령군</li>
+</ul>
+<p><img data-src="images/paste-11.png"></p>
+</div><div class="column" style="width:50%;">
+<!-- 공간 분포 지도 삽입 -->
+<p><img data-src="images/RR_202506.png"></p>
+<!-- ![](figs/map_e9.png){width=100%} -->
+</div></div>
+</section></section>
+<section>
+<section id="모형-비교" class="title-slide slide level1 center">
+<h1>5. 모형 비교</h1>
+
+</section>
+<section id="waic-기반-분기별-모형-비교" class="slide level2">
+<h2>WAIC 기반 분기별 모형 비교</h2>
+<p>시공간 상호작용을 고려한 모형의 <strong>설명력이 가장 우수함</strong>.</p>
+<table class="caption-top">
+<colgroup>
+<col style="width: 24%">
+<col style="width: 26%">
+<col style="width: 24%">
+<col style="width: 24%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Model</th>
+<th>특징</th>
+<th>WAIC</th>
+<th>비고</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>(1), (2) Temporal</td>
+<td>RW1 / AR1</td>
+<td>12.1억</td>
+<td>설명력 낮음</td>
+</tr>
+<tr class="even">
+<td>(3) Covariates</td>
+<td>공변량만 추가</td>
+<td>8.6억</td>
+<td>일부 개선</td>
+</tr>
+<tr class="odd">
+<td>(4) Additive</td>
+<td>공간 + 시간 (additive)</td>
+<td>392만</td>
+<td>대폭 개선</td>
+</tr>
+<tr class="even">
+<td>(5) Interaction</td>
+<td>공간 × 시간 상호작용(BYM2*AR1)</td>
+<td>10.1만</td>
+<td><strong>Best Model</strong></td>
+</tr>
+<tr class="odd">
+<td>(6) Full Model</td>
+<td>상호작용 + 공변량</td>
+<td>10.1만</td>
+<td>(5)와 유사</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="해석" class="slide level2">
+<h2><strong>해석</strong></h2>
+<ul>
+<li>단순히 시계열 구조만 넣은 모형 (1), 공변량만 추가한 모형 (3)에 비해</li>
+<li><strong>지역 간 인접성(BYM2)</strong>과 <strong>시간적 흐름(AR1)</strong>을 함께 반영한 <strong>시공간 랜덤효과 모형 (5)</strong>이 E-9 외국인 분포에 대한 설명력이 뛰어남.</li>
+<li>공변량을 추가한 모형 (6)의 설명력이 크게 개선되지는 않음. (오히려 복잡도 증가로 WAIC 증가)</li>
+</ul>
+</section></section>
+<section>
+<section id="변수-선택" class="title-slide slide level1 center">
+<h1>6. 변수 선택</h1>
+
+</section>
+<section id="전체-고정-효과fixed-effects-추정-결과" class="slide level2 smaller scrollable">
+<h2>전체 고정 효과(Fixed Effects) 추정 결과</h2>
+<style>
+/* 표의 글씨를 강제로 더 줄이고 싶다면 이 스타일을 사용하세요 */
+.reveal table {
+  font-size: 0.6em; 
+}
+</style>
+<table class="table-striped table-hover caption-top" style="width:100%;">
+<colgroup>
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">구분</th>
+<th style="text-align: left;">변수명</th>
+<th style="text-align: center;">Mean</th>
+<th style="text-align: center;">SD</th>
+<th style="text-align: center;">95% CI</th>
+<th style="text-align: center;">Sig</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;"><strong>Constant</strong></td>
+<td style="text-align: left;"><strong>(Intercept)</strong></td>
+<td style="text-align: center;"><strong>-7.051</strong></td>
+<td style="text-align: center;"><strong>1.135</strong></td>
+<td style="text-align: center;"><strong>[-9.274, -4.820]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Demographic</strong></td>
+<td style="text-align: left;">성비</td>
+<td style="text-align: center;">0.012</td>
+<td style="text-align: center;">0.011</td>
+<td style="text-align: center;">[-0.009, 0.034]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">65세 이상 인구 비율</td>
+<td style="text-align: center;">0.000</td>
+<td style="text-align: center;">0.000</td>
+<td style="text-align: center;">[0.000, 0.000]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">인구 이동 유효도 지수</td>
+<td style="text-align: center;">0.004</td>
+<td style="text-align: center;">0.008</td>
+<td style="text-align: center;">[-0.011, 0.019]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Economy</strong></td>
+<td style="text-align: left;"><strong>무역수지</strong></td>
+<td style="text-align: center;"><strong>-0.041</strong></td>
+<td style="text-align: center;"><strong>0.021</strong></td>
+<td style="text-align: center;"><strong>[-0.082, -0.001]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">전국대비 1차산업 GRDP 비중</td>
+<td style="text-align: center;">0.044</td>
+<td style="text-align: center;">0.037</td>
+<td style="text-align: center;">[-0.029, 0.117]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">전국대비 2차산업 GRDP 비중</td>
+<td style="text-align: center;">0.045</td>
+<td style="text-align: center;">0.046</td>
+<td style="text-align: center;">[-0.045, 0.135]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Industry</strong></td>
+<td style="text-align: left;"><strong>제조업 종사자 비율 (Z)</strong></td>
+<td style="text-align: center;"><strong>0.721</strong></td>
+<td style="text-align: center;"><strong>0.077</strong></td>
+<td style="text-align: center;"><strong>[0.569, 0.872]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">건설업 종사자 비율 (Z)</td>
+<td style="text-align: center;">0.011</td>
+<td style="text-align: center;">0.026</td>
+<td style="text-align: center;">[-0.040, 0.062]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">도소매업 종사자 비율 (Z)</td>
+<td style="text-align: center;">0.044</td>
+<td style="text-align: center;">0.045</td>
+<td style="text-align: center;">[-0.045, 0.132]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Labor</strong></td>
+<td style="text-align: left;"><strong>고용률 (15-64) (Z)</strong></td>
+<td style="text-align: center;"><strong>-0.134</strong></td>
+<td style="text-align: center;"><strong>0.027</strong></td>
+<td style="text-align: center;"><strong>[-0.187, -0.081]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Context</strong></td>
+<td style="text-align: left;">코로나 시기</td>
+<td style="text-align: center;">0.422</td>
+<td style="text-align: center;">0.216</td>
+<td style="text-align: center;">[-0.128, 0.795]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Region</strong></td>
+<td style="text-align: left;">수도권 여부</td>
+<td style="text-align: center;">0.263</td>
+<td style="text-align: center;">0.337</td>
+<td style="text-align: center;">[-0.400, 0.922]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">시 지역 (군 대비)</td>
+<td style="text-align: center;">-0.012</td>
+<td style="text-align: center;">0.155</td>
+<td style="text-align: center;">[-0.318, 0.292]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><strong>구 지역 (군 대비)</strong></td>
+<td style="text-align: center;"><strong>-2.598</strong></td>
+<td style="text-align: center;"><strong>0.224</strong></td>
+<td style="text-align: center;"><strong>[-3.037, -2.158]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Infra</strong></td>
+<td style="text-align: left;"><strong>산업단지 유무</strong></td>
+<td style="text-align: center;"><strong>0.814</strong></td>
+<td style="text-align: center;"><strong>0.199</strong></td>
+<td style="text-align: center;"><strong>[0.426, 1.206]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">산업단지 면적 (Z)</td>
+<td style="text-align: center;">-0.038</td>
+<td style="text-align: center;">0.065</td>
+<td style="text-align: center;">[-0.165, 0.090]</td>
+<td style="text-align: center;"></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="유입-요인-pull-factors" class="slide level2">
+<h2>유입 요인 (Pull Factors)</h2>
+<ul>
+<li class="fragment"><strong>제조업 비중 (<code>ind_ratio_manufacturing_z</code>)</strong>
+<ul>
+<li class="fragment"><span class="math inline">\(\beta = 0.721\)</span></li>
+<li class="fragment">제조업 비중이 <strong>1 표준편차(SD) 증가</strong>할 때, 외국인력 유입은 약 <strong>2.06배</strong> 증가<br>
+(<span class="math inline">\(\exp(0.721) \approx 2.056\)</span>)</li>
+<li class="fragment">해석: 지역 내 제조업 기반이 E-9 인력 수요의 절대적인 결정 요인</li>
+</ul></li>
+<li class="fragment"><strong>산업단지 유무 (<code>indpark_dummy</code>)</strong>
+<ul>
+<li class="fragment"><span class="math inline">\(\beta = 0.814\)</span></li>
+<li class="fragment">산업단지가 <strong>있는 지역</strong>은 없는 지역 대비 약 <strong>2.26배</strong> 더 많은 외국인력이 유입됨<br>
+(<span class="math inline">\(\exp(0.814) \approx 2.257\)</span>)</li>
+<li class="fragment">단순 면적(<code>area_mgmt</code>)은 크게 상관이 없었음</li>
+</ul></li>
+</ul>
+</section>
+<section id="억제-및-대체-요인-push-substitution" class="slide level2">
+<h2>억제 및 대체 요인 (Push &amp; Substitution)</h2>
+<div class="panel-tabset">
+<ul id="tabset-1" class="panel-tabset-tabby"><li><a data-tabby-default="" href="#tabset-1-1">지역적 특성</a></li><li><a href="#tabset-1-2">노동시장 특성</a></li></ul>
+<div class="tab-content">
+<div id="tabset-1-1">
+<ul>
+<li><strong>구(Gu) 지역 더미 (<code>dummy_gu</code>)</strong>
+<ul>
+<li><span class="math inline">\(\beta = -2.598\)</span> (매우 강력한 음의 효과)</li>
+<li>~군 지역 대비, 대도시 자치구 지역의 외국인력은 <strong>약 7.4% 수준</strong>에 불과<br>
+(<span class="math inline">\(\exp(-2.598) \approx 0.074\)</span>)</li>
+<li>해석: E-9 비자의 특성상 주거 중심의 대도시(구)보다는 농공단지/산업단지가 위치한 군 단위 지역에 집중됨</li>
+</ul></li>
+</ul>
+</div>
+<div id="tabset-1-2">
+<ul>
+<li><strong>내국인 고용률 (<code>lf_employment_rate</code>)</strong>
+<ul>
+<li><span class="math inline">\(\beta = -0.134\)</span></li>
+<li>고용률이 <strong>1 SD 증가</strong>하면 외국인력은 약 <strong>12.5% 감소</strong><br>
+(<span class="math inline">\(\exp(-0.134) \approx 0.875\)</span>).</li>
+<li>해석(대체 관계): 내국인 고용 사정이 좋은 지역일수록 비전문 외국인력에 대한 의존도가 낮음. 반대로, <strong>내국인 구인이 어려운 지역에서 외국인력 수요가 급증</strong>하는 ‘빈자리 채우기’ 성격이 확인됨.</li>
+</ul></li>
+</ul>
+</div>
+</div>
+</div>
+</section></section>
+<section>
+<section id="확장된-모형들" class="title-slide slide level1 center">
+<h1>7. 확장된 모형들</h1>
+
+</section>
+<section id="e9-1제조업-등록인원-발생률" class="slide level2">
+<h2>E9-1(제조업) 등록인원 발생률</h2>
+<table class="caption-top" style="width:100%;">
+<colgroup>
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">구분</th>
+<th style="text-align: left;">변수명</th>
+<th style="text-align: center;">Mean</th>
+<th style="text-align: center;">SD</th>
+<th style="text-align: center;">95% CI</th>
+<th style="text-align: center;">Sig</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;"><strong>Constant</strong></td>
+<td style="text-align: left;"><strong>(Intercept)</strong></td>
+<td style="text-align: center;"><strong>-7.499</strong></td>
+<td style="text-align: center;"><strong>0.306</strong></td>
+<td style="text-align: center;"><strong>[-8.087, -6.909]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Demographic</strong></td>
+<td style="text-align: left;">성비 (Z)</td>
+<td style="text-align: center;">0.056</td>
+<td style="text-align: center;">0.067</td>
+<td style="text-align: center;">[-0.075, 0.187]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><strong>65세 이상 인구 (Z)</strong></td>
+<td style="text-align: center;"><strong>-0.278</strong></td>
+<td style="text-align: center;"><strong>0.076</strong></td>
+<td style="text-align: center;"><strong>[-0.428, -0.130]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">인구이동지표 (Z)</td>
+<td style="text-align: center;">0.002</td>
+<td style="text-align: center;">0.008</td>
+<td style="text-align: center;">[-0.013, 0.018]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Economy</strong></td>
+<td style="text-align: left;"><strong>무역수지 (Z)</strong></td>
+<td style="text-align: center;"><strong>-0.047</strong></td>
+<td style="text-align: center;"><strong>0.020</strong></td>
+<td style="text-align: center;"><strong>[-0.087, -0.007]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">1차산업 GRDP 편차 (Z)</td>
+<td style="text-align: center;">-0.009</td>
+<td style="text-align: center;">0.038</td>
+<td style="text-align: center;">[-0.084, 0.065]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">2차산업 GRDP 편차 (Z)</td>
+<td style="text-align: center;">0.044</td>
+<td style="text-align: center;">0.046</td>
+<td style="text-align: center;">[-0.047, 0.134]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Industry</strong></td>
+<td style="text-align: left;"><strong>제조업 비율 (Z)</strong></td>
+<td style="text-align: center;"><strong>0.977</strong></td>
+<td style="text-align: center;"><strong>0.083</strong></td>
+<td style="text-align: center;"><strong>[0.813, 1.139]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">건설업 비율 (Z)</td>
+<td style="text-align: center;">0.020</td>
+<td style="text-align: center;">0.027</td>
+<td style="text-align: center;">[-0.033, 0.072]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">도소매업 비율 (Z)</td>
+<td style="text-align: center;">0.027</td>
+<td style="text-align: center;">0.047</td>
+<td style="text-align: center;">[-0.065, 0.119]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Labor</strong></td>
+<td style="text-align: left;"><strong>고용률 (15-64) (Z)</strong></td>
+<td style="text-align: center;"><strong>-0.150</strong></td>
+<td style="text-align: center;"><strong>0.027</strong></td>
+<td style="text-align: center;"><strong>[-0.202, -0.097]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Context</strong></td>
+<td style="text-align: left;">코로나 시기</td>
+<td style="text-align: center;">0.421</td>
+<td style="text-align: center;">0.203</td>
+<td style="text-align: center;">[-0.046, 0.798]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Region</strong></td>
+<td style="text-align: left;">수도권 여부</td>
+<td style="text-align: center;">0.473</td>
+<td style="text-align: center;">0.385</td>
+<td style="text-align: center;">[-0.284, 1.228]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">시 지역 (군 대비)</td>
+<td style="text-align: center;">0.231</td>
+<td style="text-align: center;">0.173</td>
+<td style="text-align: center;">[-0.109, 0.570]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><strong>구 지역 (군 대비)</strong></td>
+<td style="text-align: center;"><strong>-2.479</strong></td>
+<td style="text-align: center;"><strong>0.253</strong></td>
+<td style="text-align: center;"><strong>[-2.974, -1.983]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Infra</strong></td>
+<td style="text-align: left;"><strong>산업단지 유무</strong></td>
+<td style="text-align: center;"><strong>1.188</strong></td>
+<td style="text-align: center;"><strong>0.230</strong></td>
+<td style="text-align: center;"><strong>[0.738, 1.642]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">산단 관리면적 (Z)</td>
+<td style="text-align: center;">-0.014</td>
+<td style="text-align: center;">0.073</td>
+<td style="text-align: center;">[-0.157, 0.131]</td>
+<td style="text-align: center;"></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>pop_65plus</code> (<span class="math inline">\(\beta \approx -0.28\)</span>): 고령화가 심한 지역일수록 제조업 기반이 약화되어 외국인력 수요가 낮게 나타남</li>
+<li><code>trade_balance</code> (<span class="math inline">\(\beta \approx -0.05\)</span>): 무역수지가 악화될수록(적자) 비전문 외국인력 의존도가 높아지는 경향</li>
+</ul>
+</section>
+<section id="e9-3농업-등록인원-발생률" class="slide level2">
+<h2>E9-3(농업) 등록인원 발생률</h2>
+<style>
+.reveal table {
+  font-size: 0.55em; 
+}
+</style>
+<table class="table-striped table-hover caption-top" style="width:100%;">
+<colgroup>
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+<col style="width: 16%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">구분</th>
+<th style="text-align: left;">변수명</th>
+<th style="text-align: center;">Mean</th>
+<th style="text-align: center;">SD</th>
+<th style="text-align: center;">95% CI</th>
+<th style="text-align: center;">Sig</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;"><strong>Constant</strong></td>
+<td style="text-align: left;">(Intercept)</td>
+<td style="text-align: center;">-1.455</td>
+<td style="text-align: center;">1.184</td>
+<td style="text-align: center;">[-3.778, 0.869]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Demographic</strong></td>
+<td style="text-align: left;">성비</td>
+<td style="text-align: center;">-0.004</td>
+<td style="text-align: center;">0.010</td>
+<td style="text-align: center;">[-0.024, 0.015]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">65세 이상 인구 비율</td>
+<td style="text-align: center;">0.000</td>
+<td style="text-align: center;">0.000</td>
+<td style="text-align: center;">[0.000, 0.000]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><strong>인구이동유효도지수 (Z)</strong></td>
+<td style="text-align: center;"><strong>0.015</strong></td>
+<td style="text-align: center;"><strong>0.006</strong></td>
+<td style="text-align: center;"><strong>[0.003, 0.027]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Economy</strong></td>
+<td style="text-align: left;">무역수지 (Z)</td>
+<td style="text-align: center;">-0.026</td>
+<td style="text-align: center;">0.019</td>
+<td style="text-align: center;">[-0.063, 0.011]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">1차산업 GRDP 편차 (Z)</td>
+<td style="text-align: center;">-0.045</td>
+<td style="text-align: center;">0.031</td>
+<td style="text-align: center;">[-0.106, 0.015]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">2차산업 GRDP 편차 (Z)</td>
+<td style="text-align: center;">-0.064</td>
+<td style="text-align: center;">0.043</td>
+<td style="text-align: center;">[-0.148, 0.021]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Industry</strong></td>
+<td style="text-align: left;"><strong>제조업 비율 (Z)</strong></td>
+<td style="text-align: center;"><strong>0.330</strong></td>
+<td style="text-align: center;"><strong>0.082</strong></td>
+<td style="text-align: center;"><strong>[0.170, 0.490]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">건설업 비율 (Z)</td>
+<td style="text-align: center;">0.026</td>
+<td style="text-align: center;">0.020</td>
+<td style="text-align: center;">[-0.014, 0.066]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">도소매업 비율 (Z)</td>
+<td style="text-align: center;">0.059</td>
+<td style="text-align: center;">0.040</td>
+<td style="text-align: center;">[-0.020, 0.138]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Labor</strong></td>
+<td style="text-align: left;"><strong>고용률 (15-64) (Z)</strong></td>
+<td style="text-align: center;"><strong>-0.076</strong></td>
+<td style="text-align: center;"><strong>0.021</strong></td>
+<td style="text-align: center;"><strong>[-0.117, -0.035]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Context</strong></td>
+<td style="text-align: left;">코로나 시기</td>
+<td style="text-align: center;">0.055</td>
+<td style="text-align: center;">0.183</td>
+<td style="text-align: center;">[-0.294, 0.439]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Region</strong></td>
+<td style="text-align: left;">수도권 여부</td>
+<td style="text-align: center;">0.326</td>
+<td style="text-align: center;">0.691</td>
+<td style="text-align: center;">[-1.029, 1.681]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">시 지역 (군 대비)</td>
+<td style="text-align: center;">-0.407</td>
+<td style="text-align: center;">0.308</td>
+<td style="text-align: center;">[-1.013, 0.196]</td>
+<td style="text-align: center;"></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><strong>구 지역 (군 대비)</strong></td>
+<td style="text-align: center;"><strong>-6.328</strong></td>
+<td style="text-align: center;"><strong>0.451</strong></td>
+<td style="text-align: center;"><strong>[-7.216, -5.446]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><strong>Infra</strong></td>
+<td style="text-align: left;"><strong>산업단지 유무</strong></td>
+<td style="text-align: center;"><strong>2.071</strong></td>
+<td style="text-align: center;"><strong>0.433</strong></td>
+<td style="text-align: center;"><strong>[1.227, 2.926]</strong></td>
+<td style="text-align: center;"><strong>Yes</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"></td>
+<td style="text-align: left;">산단 관리면적 (Z)</td>
+<td style="text-align: center;">-0.092</td>
+<td style="text-align: center;">0.131</td>
+<td style="text-align: center;">[-0.349, 0.165]</td>
+<td style="text-align: center;"></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><p><code>dummy_gu</code> (<span class="math inline">\(\beta \approx -6.3\)</span>): 대도시 자치구 지역은 E9-3 수요가 사실상 0에 수렴</p></li>
+<li><p><code>indpark</code> (<span class="math inline">\(\beta \approx 2.1\)</span>): 순수 경작지보다 <strong>농공단지</strong>가 결합된 지역에서 인력 수요 급증</p></li>
+</ul>
+</section>
+<section id="svcspatially-varing-coefficient1" class="slide level2 scrollable">
+<h2>SVC(Spatially Varing Coefficient)<sup>1</sup></h2>
+<div class="columns">
+<div class="column" style="width:50%;">
+<ul>
+<li>전국대비 1차산업 비중 (기존: <span class="math inline">\(\hat\beta =  0.044\)</span>)</li>
+</ul>
+<p><img data-src="images/paste-9.png"></p>
+<ul>
+<li>전국적으로 영향이 미미하나, 전남 등 농업 중심 지자체에서 핵심 동인으로 작용</li>
+</ul>
+</div><div class="column" style="width:50%;">
+<ul>
+<li>전국대비 2차산업 비중 (기존: <span class="math inline">\(\hat\beta =  0.045\)</span>)</li>
+</ul>
+<p><img data-src="images/paste-10.png"></p>
+<ul>
+<li>수도권 대비 충청권, 영남권에서 2차산업 비중의 영향력이 낮음</li>
+</ul>
+</div></div>
+<aside><ol class="aside-footnotes"><li id="fn1"><p>E9(전체) 발생률</p></li></ol></aside></section></section>
+<section>
+<section id="결론" class="title-slide slide level1 center">
+<h1>8. 결론</h1>
+
+</section>
+<section id="고용허가제-외국인-근로자-패널-자료-분석" class="slide level2 scrollable">
+<h2>고용허가제 외국인 근로자 패널 자료 분석</h2>
+<ol type="1">
+<li>패널 데이터의 구조적 특성 확인</li>
+</ol>
+<ul>
+<li><p>E-9 등록외국인 데이터는 무작위 분포가 아닌, <strong>강한 공간적 자기상관(Spatial Autocorrelation)</strong>과 <strong>시계열적 의존성(Temporal Dependence),</strong> 둘 간의 상호작용에 의한 의존성을 내포하고 있음</p></li>
+<li><p>’독립성 가정’이 위배됨 → 시공간적 의존성을 제외한 결정 요인의 영향력 분석할 필요 있음</p></li>
+</ul>
+<div class="fragment">
+<ol start="2" type="1">
+<li>시공간 베이지안 계층 모형</li>
+</ol>
+<ul>
+<li><p>기존의 선형 회귀나 단순 패널 모형은 시공간적 상호작용을 설명하는 데 한계가 있음</p></li>
+<li><p>시공간 베이지안 모형은 고정효과와 랜덤효과를 계층적으로 분리하여 이를 효과적으로 모델링 함</p></li>
+<li><p>SVC, 세부자격별 모형, 다른 공분산 구조 등으로 확장 가능함</p></li>
+</ul>
+</div>
+<div class="fragment">
+<p><span class="math inline">\(\implies\)</span> 단순한 총량 규제를 넘어, 시군구별 산업 특성과 인구 구조를 반영한 정밀한 지역 맞춤형 외국인력 정책 수립의 실증적 근거를 제공</p>
+</div>
+</section>
+<section id="추가-연구" class="slide level2 scrollable">
+<h2>추가 연구</h2>
+<ol type="1">
+<li><strong>변수 확장</strong>
+<ul>
+<li>시군구 단위의 정밀 변수 추가
+<ul>
+<li>순이동, 성비, 연령구조 세분화</li>
+</ul></li>
+<li>정책적/환경적 요인 추가
+<ul>
+<li>이주민 커뮤니티, 주거 환경 등</li>
+</ul></li>
+<li>시간 지연 효과 고려: 전기(前期) 변수 이용</li>
+<li>시도 단위 변수 이용</li>
+</ul></li>
+</ol>
+<div class="fragment">
+<ol start="2" type="1">
+<li><strong>Spatial Confounding인가?</strong>
+<ul>
+<li>RSR (Restricted Spatial Regression)</li>
+<li>Spatial+ 기법 적용 검토</li>
+</ul></li>
+</ol>
+</div>
+</section>
+<section class="slide level2">
+
+</section></section>
+<section id="q-a" class="title-slide slide level1 center">
+<h1>Q &amp; A</h1>
+<p>감사합니다.</p>
+
+</section>
+
+
+    </div>
+  <div class="quarto-auto-generated-content" style="display: none;">
+<div class="footer footer-default">
+
+</div>
+</div></div>
+
+  <script>window.backupDefine = window.define; window.define = undefined;</script>
+  <script src="e9_presentation_files/libs/revealjs/dist/reveal.js"></script>
+  <!-- reveal.js plugins -->
+  <script src="e9_presentation_files/libs/revealjs/plugin/quarto-line-highlight/line-highlight.js"></script>
+  <script src="e9_presentation_files/libs/revealjs/plugin/pdf-export/pdfexport.js"></script>
+  <script src="e9_presentation_files/libs/revealjs/plugin/reveal-menu/menu.js"></script>
+  <script src="e9_presentation_files/libs/revealjs/plugin/reveal-menu/quarto-menu.js"></script>
+  <script src="e9_presentation_files/libs/revealjs/plugin/quarto-support/support.js"></script>
+  
+
+  <script src="e9_presentation_files/libs/revealjs/plugin/notes/notes.js"></script>
+  <script src="e9_presentation_files/libs/revealjs/plugin/search/search.js"></script>
+  <script src="e9_presentation_files/libs/revealjs/plugin/zoom/zoom.js"></script>
+  <script src="e9_presentation_files/libs/revealjs/plugin/math/math.js"></script>
+  <script>window.define = window.backupDefine; window.backupDefine = undefined;</script>
+
+  <script>
+
+      // Full list of configuration options available at:
+      // https://revealjs.com/config/
+      Reveal.initialize({
+'controlsAuto': true,
+'previewLinksAuto': false,
+'pdfSeparateFragments': false,
+'autoAnimateEasing': "ease",
+'autoAnimateDuration': 1,
+'autoAnimateUnmatched': true,
+'jumpToSlide': true,
+'menu': {"side":"left","useTextContentForMissingTitles":true,"markers":false,"loadIcons":false,"custom":[{"title":"Tools","icon":"<i class=\"fas fa-gear\"></i>","content":"<ul class=\"slide-menu-items\">\n<li class=\"slide-tool-item active\" data-item=\"0\"><a href=\"#\" onclick=\"RevealMenuToolHandlers.fullscreen(event)\"><kbd>f</kbd> Fullscreen</a></li>\n<li class=\"slide-tool-item\" data-item=\"1\"><a href=\"#\" onclick=\"RevealMenuToolHandlers.speakerMode(event)\"><kbd>s</kbd> Speaker View</a></li>\n<li class=\"slide-tool-item\" data-item=\"2\"><a href=\"#\" onclick=\"RevealMenuToolHandlers.overview(event)\"><kbd>o</kbd> Slide Overview</a></li>\n<li class=\"slide-tool-item\" data-item=\"3\"><a href=\"#\" onclick=\"RevealMenuToolHandlers.togglePdfExport(event)\"><kbd>e</kbd> PDF Export Mode</a></li>\n<li class=\"slide-tool-item\" data-item=\"4\"><a href=\"#\" onclick=\"RevealMenuToolHandlers.toggleScrollView(event)\"><kbd>r</kbd> Scroll View Mode</a></li>\n<li class=\"slide-tool-item\" data-item=\"5\"><a href=\"#\" onclick=\"RevealMenuToolHandlers.keyboardHelp(event)\"><kbd>?</kbd> Keyboard Help</a></li>\n</ul>"}],"openButton":true},
+'smaller': true,
+ 
+        // Display controls in the bottom right corner
+        controls: false,
+
+        // Help the user learn the controls by providing hints, for example by
+        // bouncing the down arrow when they first encounter a vertical slide
+        controlsTutorial: false,
+
+        // Determines where controls appear, "edges" or "bottom-right"
+        controlsLayout: 'edges',
+
+        // Visibility rule for backwards navigation arrows; "faded", "hidden"
+        // or "visible"
+        controlsBackArrows: 'faded',
+
+        // Display a presentation progress bar
+        progress: true,
+
+        // Display the page number of the current slide
+        slideNumber: 'c/t',
+
+        // 'all', 'print', or 'speaker'
+        showSlideNumber: 'all',
+
+        // Add the current slide number to the URL hash so that reloading the
+        // page/copying the URL will return you to the same slide
+        hash: true,
+
+        // Start with 1 for the hash rather than 0
+        hashOneBasedIndex: false,
+
+        // Flags if we should monitor the hash and change slides accordingly
+        respondToHashChanges: true,
+
+        // Push each slide change to the browser history
+        history: true,
+
+        // Enable keyboard shortcuts for navigation
+        keyboard: true,
+
+        // Enable the slide overview mode
+        overview: true,
+
+        // Disables the default reveal.js slide layout (scaling and centering)
+        // so that you can use custom CSS layout
+        disableLayout: false,
+
+        // Vertical centering of slides
+        center: false,
+
+        // Enables touch navigation on devices with touch input
+        touch: true,
+
+        // Loop the presentation
+        loop: false,
+
+        // Change the presentation direction to be RTL
+        rtl: false,
+
+        // see https://revealjs.com/vertical-slides/#navigation-mode
+        navigationMode: 'linear',
+
+        // Randomizes the order of slides each time the presentation loads
+        shuffle: false,
+
+        // Turns fragments on and off globally
+        fragments: true,
+
+        // Flags whether to include the current fragment in the URL,
+        // so that reloading brings you to the same fragment position
+        fragmentInURL: false,
+
+        // Flags if the presentation is running in an embedded mode,
+        // i.e. contained within a limited portion of the screen
+        embedded: false,
+
+        // Flags if we should show a help overlay when the questionmark
+        // key is pressed
+        help: true,
+
+        // Flags if it should be possible to pause the presentation (blackout)
+        pause: true,
+
+        // Flags if speaker notes should be visible to all viewers
+        showNotes: false,
+
+        // Global override for autoplaying embedded media (null/true/false)
+        autoPlayMedia: null,
+
+        // Global override for preloading lazy-loaded iframes (null/true/false)
+        preloadIframes: null,
+
+        // Number of milliseconds between automatically proceeding to the
+        // next slide, disabled when set to 0, this value can be overwritten
+        // by using a data-autoslide attribute on your slides
+        autoSlide: 0,
+
+        // Stop auto-sliding after user input
+        autoSlideStoppable: true,
+
+        // Use this method for navigation when auto-sliding
+        autoSlideMethod: null,
+
+        // Specify the average time in seconds that you think you will spend
+        // presenting each slide. This is used to show a pacing timer in the
+        // speaker view
+        defaultTiming: null,
+
+        // Enable slide navigation via mouse wheel
+        mouseWheel: false,
+
+        // The display mode that will be used to show slides
+        display: 'block',
+
+        // Hide cursor if inactive
+        hideInactiveCursor: true,
+
+        // Time before the cursor is hidden (in ms)
+        hideCursorTime: 5000,
+
+        // Opens links in an iframe preview overlay
+        previewLinks: false,
+
+        // Transition style (none/fade/slide/convex/concave/zoom)
+        transition: 'fade',
+
+        // Transition speed (default/fast/slow)
+        transitionSpeed: 'default',
+
+        // Transition style for full page slide backgrounds
+        // (none/fade/slide/convex/concave/zoom)
+        backgroundTransition: 'none',
+
+        // Number of slides away from the current that are visible
+        viewDistance: 3,
+
+        // Number of slides away from the current that are visible on mobile
+        // devices. It is advisable to set this to a lower number than
+        // viewDistance in order to save resources.
+        mobileViewDistance: 2,
+
+        // The "normal" size of the presentation, aspect ratio will be preserved
+        // when the presentation is scaled to fit different resolutions. Can be
+        // specified using percentage units.
+        width: 1050,
+
+        height: 700,
+
+        // Factor of the display size that should remain empty around the content
+        margin: 0.1,
+
+        math: {
+          mathjax: 'https://cdn.jsdelivr.net/npm/mathjax@2.7.9/MathJax.js',
+          config: 'TeX-AMS_HTML-full',
+          tex2jax: {
+            inlineMath: [['\\(','\\)']],
+            displayMath: [['\\[','\\]']],
+            balanceBraces: true,
+            processEscapes: false,
+            processRefs: true,
+            processEnvironments: true,
+            preview: 'TeX',
+            skipTags: ['script','noscript','style','textarea','pre','code'],
+            ignoreClass: 'tex2jax_ignore',
+            processClass: 'tex2jax_process'
+          },
+        },
+
+        // reveal.js plugins
+        plugins: [QuartoLineHighlight, PdfExport, RevealMenu, QuartoSupport,
+
+          RevealMath,
+          RevealNotes,
+          RevealSearch,
+          RevealZoom
+        ]
+      });
+    </script>
+    <script id="quarto-html-after-body" type="application/javascript">
+      window.document.addEventListener("DOMContentLoaded", function (event) {
+        const tabsets =  window.document.querySelectorAll(".panel-tabset-tabby")
+        tabsets.forEach(function(tabset) {
+          const tabby = new Tabby('#' + tabset.id);
+        });
+        const isCodeAnnotation = (el) => {
+          for (const clz of el.classList) {
+            if (clz.startsWith('code-annotation-')) {                     
+              return true;
+            }
+          }
+          return false;
+        }
+        const onCopySuccess = function(e) {
+          // button target
+          const button = e.trigger;
+          // don't keep focus
+          button.blur();
+          // flash "checked"
+          button.classList.add('code-copy-button-checked');
+          var currentTitle = button.getAttribute("title");
+          button.setAttribute("title", "Copied!");
+          let tooltip;
+          if (window.bootstrap) {
+            button.setAttribute("data-bs-toggle", "tooltip");
+            button.setAttribute("data-bs-placement", "left");
+            button.setAttribute("data-bs-title", "Copied!");
+            tooltip = new bootstrap.Tooltip(button, 
+              { trigger: "manual", 
+                customClass: "code-copy-button-tooltip",
+                offset: [0, -8]});
+            tooltip.show();    
+          }
+          setTimeout(function() {
+            if (tooltip) {
+              tooltip.hide();
+              button.removeAttribute("data-bs-title");
+              button.removeAttribute("data-bs-toggle");
+              button.removeAttribute("data-bs-placement");
+            }
+            button.setAttribute("title", currentTitle);
+            button.classList.remove('code-copy-button-checked');
+          }, 1000);
+          // clear code selection
+          e.clearSelection();
+        }
+        const getTextToCopy = function(trigger) {
+          const outerScaffold = trigger.parentElement.cloneNode(true);
+          const codeEl = outerScaffold.querySelector('code');
+          for (const childEl of codeEl.children) {
+            if (isCodeAnnotation(childEl)) {
+              childEl.remove();
+            }
+          }
+          return codeEl.innerText;
+        }
+        const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+          text: getTextToCopy
+        });
+        clipboard.on('success', onCopySuccess);
+        if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+          const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+            text: getTextToCopy,
+            container: window.document.getElementById('quarto-embedded-source-code-modal')
+          });
+          clipboardModal.on('success', onCopySuccess);
+        }
+          var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+          var mailtoRegex = new RegExp(/^mailto:/);
+            var filterRegex = new RegExp('/' + window.location.host + '/');
+          var isInternal = (href) => {
+              return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+          }
+          // Inspect non-navigation links and adorn them if external
+         var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+          for (var i=0; i<links.length; i++) {
+            const link = links[i];
+            if (!isInternal(link.href)) {
+              // undo the damage that might have been done by quarto-nav.js in the case of
+              // links that we want to consider external
+              if (link.dataset.originalHref !== undefined) {
+                link.href = link.dataset.originalHref;
+              }
+            }
+          }
+        function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+          const config = {
+            allowHTML: true,
+            maxWidth: 500,
+            delay: 100,
+            arrow: false,
+            appendTo: function(el) {
+                return el.closest('section.slide') || el.parentElement;
+            },
+            interactive: true,
+            interactiveBorder: 10,
+            theme: 'light-border',
+            placement: 'bottom-start',
+          };
+          if (contentFn) {
+            config.content = contentFn;
+          }
+          if (onTriggerFn) {
+            config.onTrigger = onTriggerFn;
+          }
+          if (onUntriggerFn) {
+            config.onUntrigger = onUntriggerFn;
+          }
+            config['offset'] = [0,0];
+            config['maxWidth'] = 700;
+          window.tippy(el, config); 
+        }
+        const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+        for (var i=0; i<noterefs.length; i++) {
+          const ref = noterefs[i];
+          tippyHover(ref, function() {
+            // use id or data attribute instead here
+            let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+            try { href = new URL(href).hash; } catch {}
+            const id = href.replace(/^#\/?/, "");
+            const note = window.document.getElementById(id);
+            if (note) {
+              return note.innerHTML;
+            } else {
+              return "";
+            }
+          });
+        }
+        const findCites = (el) => {
+          const parentEl = el.parentElement;
+          if (parentEl) {
+            const cites = parentEl.dataset.cites;
+            if (cites) {
+              return {
+                el,
+                cites: cites.split(' ')
+              };
+            } else {
+              return findCites(el.parentElement)
+            }
+          } else {
+            return undefined;
+          }
+        };
+        var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+        for (var i=0; i<bibliorefs.length; i++) {
+          const ref = bibliorefs[i];
+          const citeInfo = findCites(ref);
+          if (citeInfo) {
+            tippyHover(citeInfo.el, function() {
+              var popup = window.document.createElement('div');
+              citeInfo.cites.forEach(function(cite) {
+                var citeDiv = window.document.createElement('div');
+                citeDiv.classList.add('hanging-indent');
+                citeDiv.classList.add('csl-entry');
+                var biblioDiv = window.document.getElementById('ref-' + cite);
+                if (biblioDiv) {
+                  citeDiv.innerHTML = biblioDiv.innerHTML;
+                }
+                popup.appendChild(citeDiv);
+              });
+              return popup.innerHTML;
+            });
+          }
+        }
+      });
+      </script>
+    
+
+</body></html>

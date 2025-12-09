@@ -24,6 +24,7 @@ library(stringr)
 library(sf)
 library(spdep)
 library(Matrix)
+library(ggplot2)
 ```
 
 
@@ -75,6 +76,94 @@ setDT(dt_y)
 G <- INLA::inla.read.graph("sgg_graph.adj")
 ```
 
+### INLA setting
+```{r}
+inla.setOption(inla.mode = "experimental")
+```
+
+### covariates list
+```{r}
+## 0) 공변량 리스트 한 번만 정의
+covariates <- c(
+  "sex_ratio_z",
+  "pop_65plus_z",
+  "trade_balance_z",
+  "mei_z",
+  "grdp_1st_dev_z",
+  "grdp_2nd_dev_z",
+  "ind_ratio_manufacturing_z",
+  "ind_ratio_construction_z",
+  "ind_ratio_wholesale_retail_z",
+  "lf_employment_rate_15_64_z",
+  "dummy_covid",
+  "dummy_capital",
+  "dummy_si",
+  "dummy_gu",
+  "indpark_dummy",
+  "indpark_area_mgmt_z"
+)
+
+covariate_terms <- paste(covariates, collapse = " + ")
+
+## 1) 여러 formula에 공변량을 붙이는 함수
+add_covariates <- function(base_form) {
+  update(base_form, as.formula(paste(". ~ . +", covariate_terms)))
+}
+```
+
+```{r}
+# 필요한 패키지 로드
+library(corrplot)
+library(dplyr)
+
+# 1. 분석 대상 공변량만 추출
+# data.table인 경우: df_subset <- dt_y[, ..covariates]
+# data.frame인 경우: df_subset <- dt_y[, covariates]
+df_subset <- dt_y %>% select(all_of(covariates))
+
+# 2. 상관계수 계산 (결측치 제외)
+cor_mat <- cor(df_subset, use = "complete.obs")
+
+# 3. 시각화 (숫자와 색상으로 표현)
+# tl.cex: 텍스트 크기, tl.col: 텍스트 색상
+corrplot(cor_mat, 
+         method = "color", 
+         type = "upper", 
+         order = "hclust", 
+         addCoef.col = "black", # 상관계수 수치 표시
+         tl.col = "black", 
+         tl.srt = 45,
+         number.cex = 0.7,
+         diag = FALSE)
+```
+```{r}
+# 필요한 패키지: car (가장 많이 사용됨)
+# install.packages("car")
+library(car)
+
+# 1. 임시 종속변수 생성 (VIF는 X끼리의 관계만 보므로 Y는 아무 값이나 상관없음)
+# 실제 종속변수가 있다면 그것을 써도 되지만, 공선성 체크용으로는 난수도 무방함
+dt_y$temp_y <- rnorm(nrow(dt_y))
+
+# 2. 회귀식(Formula) 만들기
+f <- as.formula(paste("temp_y ~", paste(covariates, collapse = " + ")))
+
+# 3. 선형 회귀모형 적합
+vif_model <- lm(f, data = dt_y)
+
+# 4. VIF 계산
+vif_values <- car::vif(vif_model)
+
+# 5. 보기 좋게 정리 (VIF가 높은 순서대로 정렬)
+vif_df <- data.frame(
+  Variable = names(vif_values), 
+  VIF = vif_values
+)
+vif_df <- vif_df[order(vif_df$VIF, decreasing = TRUE), ]
+
+print(vif_df)
+```
+
 
 ## Quarterly
 
@@ -82,7 +171,7 @@ G <- INLA::inla.read.graph("sgg_graph.adj")
 
 ```{r}
 dt_q$e9_f <- dt_q$e9 + 1L
-dt_q$E_e9 <- dt_q$population * (sum(dt_q$e9) / sum(dt_q$population))
+# dt_q$E_e9 <- dt_q$population * (sum(dt_q$e9) / sum(dt_q$population))
 
 
 fit_baseline_q <- inla(
@@ -90,7 +179,7 @@ fit_baseline_q <- inla(
              hyper = list(prec = list(prior = "pc.prec", param = c(1, 0.01)))),
   data = dt_q,
   family = "poisson",
-  offset = log(dt_q$population_total),   # ← 여기!
+  E       = dt_q$population_total,
   control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
   control.predictor = list(link = 1, compute = TRUE),
   control.inla      = list(strategy = "simplified.laplace",
@@ -98,48 +187,7 @@ fit_baseline_q <- inla(
 )
 
 summary(fit_baseline_q)
-
-```
-
-### RW1
-
-```{r}
-# 0) 공변량 생성 (음수/NA 방지)
-dt_q <- dt_q %>%
-  mutate(
-    lnx   = log1p(pmax(trade_export_val, 0)),
-    lnm   = log1p(pmax(trade_import_val, 0)),
-    balzs = as.numeric(scale(trade_balance))
-  )
-
-# 1) 노출량 E = 인구 (이미 있다면 생략)
-dt_q <- dt_q %>% mutate(E_pop = as.numeric(population_total))
-# 논리 불일치 정리(권장): E=0 & e9>0 제거
-dt_q <- dt_q %>% filter(!(E_pop <= 0 & e9 > 0))
-
-# 2) (중요) 공식(formula)을 명시적으로 따로 보관
-form_baseline_q <- e9 ~ 1 + 
-  f(time_id, model="rw1", scale.model=TRUE,
-    hyper=list(prec=list(prior="pc.prec", param=c(1,0.01))))
-
-# 3) 공변량 추가한 공식
-form_rw1cov_q <- update(form_baseline_q, . ~ . + lnx + lnm + balzs)
-
-# 4) 적합 (E= 방식; offset 쓰지 않음)
-fit_rw1cov_q <- inla(
-  formula = form_rw1cov_q,
-  data    = dt_q,
-  family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
-  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
-  control.predictor = list(link=1, compute=TRUE),
-  control.inla      = list(strategy="simplified.laplace",
-                           control.vb=list(emergency=50))
-)
-
-
-summary(fit_rw1cov_q)
-fit_rw1cov_q$waic$waic; fit_rw1cov_q$dic$dic
+fit_baseline_q$waic$waic; fit_baseline_q$dic$dic
 ```
 
 ### AR1_null
@@ -157,7 +205,7 @@ fit_ar1 <- inla(
   formula = form_ar1,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  E       = dt_q$population_total,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
@@ -168,18 +216,18 @@ summary(fit_ar1)
 fit_ar1$waic$waic; fit_ar1$dic$dic
 ```
 
-### AR1
+### AR1_cov
 
 ```{r}
 # 3) 공변량 추가한 공식
-form_ar1cov_q <- update(form_ar1, . ~ . + lnx + lnm + balzs)
+form_ar1cov_q <- add_covariates(form_ar1)
 
 # 4) 적합 (E= 방식; offset 쓰지 않음)
 fit_ar1cov_q <- inla(
   formula = form_ar1cov_q,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  E       = dt_q$population_total,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
@@ -215,7 +263,7 @@ fit_bym2_ar1 <- inla(
   formula = form_bym2_ar1,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  E       = dt_q$population_total,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
@@ -265,7 +313,7 @@ fit_interaction <- inla(
   formula = form_interaction,
   data    = dt_q,
   family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+  E       = dt_q$population_total,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
@@ -309,13 +357,7 @@ form_interaction <- e9 ~ 1 +
   )
 
 # 3) 공변량 추가한 공식
-form_cov_q <- update(form_interaction, . ~ . + 
-                       trade_export_val_z +
-                       ind_ratio_manufacturing_z +
-                       mig_net_z +
-                       sido_lf_unemployment_rate_z +
-                       sido_num_shortage_z
-                     )
+form_cov_q <- add_covariates(form_interaction)
 
 # 4) 적합 (E= 방식; offset 쓰지 않음)
 fit_cov_q <- inla(
@@ -334,270 +376,303 @@ fit_cov_q <- inla(
 summary(fit_cov_q)
 fit_cov_q$waic$waic; fit_cov_q$dic$dic
 ```
+```{r}
+summary(fit_cov_q)
+
+```
 
 ### BYM2 \* AR after Spatial +
 
 ```{r}
-# 패키지 로드 -------------------------------------------------------------
-library(INLA)
-library(dplyr)
-
-# 0. 데이터 전처리: 정렬 + 공변량 생성 -----------------------------------
-# dt_q: 시공간 패널 (열: e9, E_pop, trade_export_val, trade_import_val, time_id, space_id 등)
-
-dt_q <- dt_q %>%
-  arrange(time_id, space_id) %>%
-  mutate(
-    # 시공간 상호작용용 공간 인덱스 (time_id로 group 복제)
-    space_id_st = space_id,
-    # 무역 공변량 (원본)
-    lnx   = log1p(pmax(trade_export_val, 0)),   # export
-    lnm   = log1p(pmax(trade_import_val, 0)),   # import
-    balzs = as.numeric(scale(trade_balance))    # 필요하면 나중에 사용
-  )
-
-# (선택) NA 제거가 필요하면 여기서 처리:
-# dt_q <- dt_q %>% filter(!is.na(lnx), !is.na(lnm))
-
-
-# 1. Spatial+용 보조 모형: lnx ~ BYM2 × AR(1) (Gaussian) -----------------
-form_lnx_spplus <- lnx ~ 1 +
-  # 시간 AR(1)
-  f(time_id, model="ar1",
-    hyper = list(
-      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
-      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
-    )) +
-  # 공간×시간 BYM2 * AR(1)
-  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
-    group = time_id,
-    control.group = list(
-      model="ar1",
-      hyper = list(
-        theta1 = list(prior="pc.prec", param=c(1, 0.01)),
-        rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
-      )
-    ),
-    hyper = list(
-      prec = list(prior="pc.prec", param=c(1, 0.01)),
-      phi  = list(prior="pc", param=c(0.5, 0.5))
-    )
-  )
-
-fit_lnx_spplus <- inla(
-  formula = form_lnx_spplus,
-  data    = dt_q,
-  family  = "gaussian",
-  control.compute = list(config = TRUE),
-  control.inla = list(strategy = "simplified.laplace",
-                      control.vb = list(emergency = 50))
-)
-
-# Spatial+용 공변량: lnx에서 시공간 패턴(fitted)을 제거 -------------------
-dt_q$lnx_fit  <- fit_lnx_spplus$summary.fitted.values[, "mean"]
-dt_q$lnx_sppl <- dt_q$lnx - dt_q$lnx_fit
-dt_q$lnx_sppl <- as.numeric(scale(dt_q$lnx_sppl))   # 스케일링 (선택)
-
-
-# 2. Spatial+용 보조 모형: lnm ~ BYM2 × AR(1) (Gaussian) -----------------
-form_lnm_spplus <- lnm ~ 1 +
-  f(time_id, model="ar1",
-    hyper = list(
-      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
-      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
-    )) +
-  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
-    group = time_id,
-    control.group = list(
-      model="ar1",
-      hyper = list(
-        theta1 = list(prior="pc.prec", param=c(1, 0.01)),
-        rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
-      )
-    ),
-    hyper = list(
-      prec = list(prior="pc.prec", param=c(1, 0.01)),
-      phi  = list(prior="pc", param=c(0.5, 0.5))
-    )
-  )
-
-fit_lnm_spplus <- inla(
-  formula = form_lnm_spplus,
-  data    = dt_q,
-  family  = "gaussian",
-  control.compute = list(config = TRUE),
-  control.inla = list(strategy = "simplified.laplace",
-                      control.vb = list(emergency = 50))
-)
-
-# Spatial+용 공변량: lnm에서 시공간 패턴(fitted)을 제거 -------------------
-dt_q$lnm_fit  <- fit_lnm_spplus$summary.fitted.values[, "mean"]
-dt_q$lnm_sppl <- dt_q$lnm - dt_q$lnm_fit
-dt_q$lnm_sppl <- as.numeric(scale(dt_q$lnm_sppl))   # 스케일링 (선택)
-
-
-# 3. 원래 BYM2 × AR(1) E9 모형 (공변량 없이) ------------------------------
-form_interaction <- e9 ~ 1 +
-  # (선택) 메인 공간효과: 필요시 주석 해제
-  # f(space_id, model="bym2", graph=G, scale.model=TRUE,
-  #   hyper = list(
-  #     prec = list(prior="pc.prec", param=c(1, 0.01)),
-  #     phi  = list(prior="pc", param=c(0.5, 0.5))
-  #   )) +
-  # 시간 AR(1)
-  f(time_id, model="ar1",
-    hyper = list(
-      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
-      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
-    )) +
-  # 공간×시간 상호작용 BYM2 * AR(1)
-  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
-    group = time_id,
-    control.group = list(
-      model="ar1",
-      hyper = list(
-        theta1 = list(prior="pc.prec", param=c(1, 0.01)),
-        rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
-      )
-    ),
-    hyper = list(
-      prec = list(prior="pc.prec", param=c(1, 0.01)),
-      phi  = list(prior="pc", param=c(0.5, 0.5))
-    )
-  )
-
-fit_interaction <- inla(
-  formula = form_interaction,
-  data    = dt_q,
-  family  = "poisson",
-  E       = dt_q$E_pop,   # 기대노출(인구)
-  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
-  control.predictor = list(link=1, compute=TRUE),
-  control.inla      = list(strategy="simplified.laplace",
-                           control.vb=list(emergency=50))
-)
-
-fit_interaction$waic$waic
-fit_interaction$dic$dic
-summary(fit_interaction)
-
-
-# 4. Spatial+ 공변량을 넣은 최종 E9 모형 -------------------------------
-# 원래 form_interaction에 lnx, lnm 대신 lnx_sppl, lnm_sppl 추가
-form_cov_q_sppl <- update(
-  form_interaction,
-  . ~ . + lnx_sppl + lnm_sppl
-)
-
-fit_cov_q_sppl <- inla(
-  formula = form_cov_q_sppl,
-  data    = dt_q,
-  family  = "poisson",
-  E       = dt_q$E_pop,
-  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
-  control.predictor = list(link=1, compute=TRUE),
-  control.inla      = list(strategy="simplified.laplace",
-                           control.vb=list(emergency=50))
-)
-
-fit_cov_q_sppl$waic$waic
-fit_cov_q_sppl$dic$dic
-summary(fit_cov_q_sppl)
-
-# (선택) 원래 공변량 버전과 비교하고 싶으면:
-# form_cov_q <- update(form_interaction, . ~ . + lnx + lnm)
-# fit_cov_q  <- inla(... 동일 옵션 ...)
-# 그리고 fit_cov_q vs fit_cov_q_sppl의 β, WAIC, DIC 비교
+# # 패키지 로드 -------------------------------------------------------------
+# library(INLA)
+# library(dplyr)
+# 
+# # 0. 데이터 전처리: 정렬 + 공변량 생성 -----------------------------------
+# # dt_q: 시공간 패널 (열: e9, E_pop, trade_export_val, trade_import_val, time_id, space_id 등)
+# 
+# dt_q <- dt_q %>%
+#   arrange(time_id, space_id) %>%
+#   mutate(
+#     # 시공간 상호작용용 공간 인덱스 (time_id로 group 복제)
+#     space_id_st = space_id,
+#     # 무역 공변량 (원본)
+#     lnx   = log1p(pmax(trade_export_val, 0)),   # export
+#     lnm   = log1p(pmax(trade_import_val, 0)),   # import
+#     balzs = as.numeric(scale(trade_balance))    # 필요하면 나중에 사용
+#   )
+# 
+# # (선택) NA 제거가 필요하면 여기서 처리:
+# # dt_q <- dt_q %>% filter(!is.na(lnx), !is.na(lnm))
+# 
+# 
+# # 1. Spatial+용 보조 모형: lnx ~ BYM2 × AR(1) (Gaussian) -----------------
+# form_lnx_spplus <- lnx ~ 1 +
+#   # 시간 AR(1)
+#   f(time_id, model="ar1",
+#     hyper = list(
+#       theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+#       rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+#     )) +
+#   # 공간×시간 BYM2 * AR(1)
+#   f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+#     group = time_id,
+#     control.group = list(
+#       model="ar1",
+#       hyper = list(
+#         theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+#         rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+#       )
+#     ),
+#     hyper = list(
+#       prec = list(prior="pc.prec", param=c(1, 0.01)),
+#       phi  = list(prior="pc", param=c(0.5, 0.5))
+#     )
+#   )
+# 
+# fit_lnx_spplus <- inla(
+#   formula = form_lnx_spplus,
+#   data    = dt_q,
+#   family  = "gaussian",
+#   control.compute = list(config = TRUE),
+#   control.inla = list(strategy = "simplified.laplace",
+#                       control.vb = list(emergency = 50))
+# )
+# 
+# # Spatial+용 공변량: lnx에서 시공간 패턴(fitted)을 제거 -------------------
+# dt_q$lnx_fit  <- fit_lnx_spplus$summary.fitted.values[, "mean"]
+# dt_q$lnx_sppl <- dt_q$lnx - dt_q$lnx_fit
+# dt_q$lnx_sppl <- as.numeric(scale(dt_q$lnx_sppl))   # 스케일링 (선택)
+# 
+# 
+# # 2. Spatial+용 보조 모형: lnm ~ BYM2 × AR(1) (Gaussian) -----------------
+# form_lnm_spplus <- lnm ~ 1 +
+#   f(time_id, model="ar1",
+#     hyper = list(
+#       theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+#       rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+#     )) +
+#   f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+#     group = time_id,
+#     control.group = list(
+#       model="ar1",
+#       hyper = list(
+#         theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+#         rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+#       )
+#     ),
+#     hyper = list(
+#       prec = list(prior="pc.prec", param=c(1, 0.01)),
+#       phi  = list(prior="pc", param=c(0.5, 0.5))
+#     )
+#   )
+# 
+# fit_lnm_spplus <- inla(
+#   formula = form_lnm_spplus,
+#   data    = dt_q,
+#   family  = "gaussian",
+#   control.compute = list(config = TRUE),
+#   control.inla = list(strategy = "simplified.laplace",
+#                       control.vb = list(emergency = 50))
+# )
+# 
+# # Spatial+용 공변량: lnm에서 시공간 패턴(fitted)을 제거 -------------------
+# dt_q$lnm_fit  <- fit_lnm_spplus$summary.fitted.values[, "mean"]
+# dt_q$lnm_sppl <- dt_q$lnm - dt_q$lnm_fit
+# dt_q$lnm_sppl <- as.numeric(scale(dt_q$lnm_sppl))   # 스케일링 (선택)
+# 
+# 
+# # 3. 원래 BYM2 × AR(1) E9 모형 (공변량 없이) ------------------------------
+# form_interaction <- e9 ~ 1 +
+#   # (선택) 메인 공간효과: 필요시 주석 해제
+#   # f(space_id, model="bym2", graph=G, scale.model=TRUE,
+#   #   hyper = list(
+#   #     prec = list(prior="pc.prec", param=c(1, 0.01)),
+#   #     phi  = list(prior="pc", param=c(0.5, 0.5))
+#   #   )) +
+#   # 시간 AR(1)
+#   f(time_id, model="ar1",
+#     hyper = list(
+#       theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+#       rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+#     )) +
+#   # 공간×시간 상호작용 BYM2 * AR(1)
+#   f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+#     group = time_id,
+#     control.group = list(
+#       model="ar1",
+#       hyper = list(
+#         theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+#         rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+#       )
+#     ),
+#     hyper = list(
+#       prec = list(prior="pc.prec", param=c(1, 0.01)),
+#       phi  = list(prior="pc", param=c(0.5, 0.5))
+#     )
+#   )
+# 
+# fit_interaction <- inla(
+#   formula = form_interaction,
+#   data    = dt_q,
+#   family  = "poisson",
+#   E       = dt_q$E_pop,   # 기대노출(인구)
+#   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+#   control.predictor = list(link=1, compute=TRUE),
+#   control.inla      = list(strategy="simplified.laplace",
+#                            control.vb=list(emergency=50))
+# )
+# 
+# fit_interaction$waic$waic
+# fit_interaction$dic$dic
+# summary(fit_interaction)
+# 
+# 
+# # 4. Spatial+ 공변량을 넣은 최종 E9 모형 -------------------------------
+# # 원래 form_interaction에 lnx, lnm 대신 lnx_sppl, lnm_sppl 추가
+# form_cov_q_sppl <- update(
+#   form_interaction,
+#   . ~ . + lnx_sppl + lnm_sppl
+# )
+# 
+# fit_cov_q_sppl <- inla(
+#   formula = form_cov_q_sppl,
+#   data    = dt_q,
+#   family  = "poisson",
+#   E       = dt_q$E_pop,
+#   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+#   control.predictor = list(link=1, compute=TRUE),
+#   control.inla      = list(strategy="simplified.laplace",
+#                            control.vb=list(emergency=50))
+# )
+# 
+# fit_cov_q_sppl$waic$waic
+# fit_cov_q_sppl$dic$dic
+# summary(fit_cov_q_sppl)
+# 
+# # (선택) 원래 공변량 버전과 비교하고 싶으면:
+# # form_cov_q <- update(form_interaction, . ~ . + lnx + lnm)
+# # fit_cov_q  <- inla(... 동일 옵션 ...)
+# # 그리고 fit_cov_q vs fit_cov_q_sppl의 β, WAIC, DIC 비교
 
 ```
 
 ### BYM2 \* RW
 
 ```{r}
-# 공간 ID를 시간별로 복제한 인덱스(상호작용용)
-dt_q <- dt_q %>% arrange(time_id, space_id)
-dt_q$space_id_st <- dt_q$space_id          # 동일 값이지만 group=time_id로 복제될 것
-
-form_interaction_rw <- e9 ~ 1 +
-  # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
-  f(space_id, model="bym2", graph=G, scale.model=TRUE,
-    hyper = list(
-      prec = list(prior="pc.prec", param=c(1, 0.01)),
-      phi  = list(prior="pc", param=c(0.5, 0.5))
-    )) +
-  # 메인 시간효과
-  f(time_id, model="rw1",
-    hyper = list(
-      prec = list(prior="pc.prec", param=c(1, 0.01)),
-      )) +
-  # 공간×시간 상호작용: BYM2를 시간별 복제, 시간 간 RW(1)로 연결
-  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
-    group = time_id,
-    control.group = list(model="rw1",
-                         hyper = list(
-                           prec = list(prior="pc.prec", param=c(1, 0.01)),
-                         )),
-    hyper = list(
-      prec = list(prior="pc.prec", param=c(1, 0.01)),
-    )
-  )
-
-fit_interaction_rw <- inla(
-  formula = form_interaction_rw,
-  data    = dt_q,
-  family  = "poisson",
-  E       = dt_q$E_pop,   # ★ 인구를 기대노출로
-  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
-  control.predictor = list(link=1, compute=TRUE),
-  control.inla      = list(strategy="simplified.laplace",
-                           int.strategy = "auto",
-                           control.vb=list(emergency=50))
-)
-
-summary(fit_interaction_rw)
-fit_interaction_rw$waic$waic; fit_interaction_rw$dic$dic
+# # 공간 ID를 시간별로 복제한 인덱스(상호작용용)
+# dt_q <- dt_q %>% arrange(time_id, space_id)
+# dt_q$space_id_st <- dt_q$space_id          # 동일 값이지만 group=time_id로 복제될 것
+# 
+# form_interaction_rw <- e9 ~ 1 +
+#   # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
+#   f(space_id, model="bym2", graph=G, scale.model=TRUE,
+#     hyper = list(
+#       prec = list(prior="pc.prec", param=c(1, 0.01)),
+#       phi  = list(prior="pc", param=c(0.5, 0.5))
+#     )) +
+#   # 메인 시간효과
+#   f(time_id, model="rw1",
+#     hyper = list(
+#       prec = list(prior="pc.prec", param=c(1, 0.01)),
+#       )) +
+#   # 공간×시간 상호작용: BYM2를 시간별 복제, 시간 간 RW(1)로 연결
+#   f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+#     group = time_id,
+#     control.group = list(model="rw1",
+#                          hyper = list(
+#                            prec = list(prior="pc.prec", param=c(1, 0.01)),
+#                          )),
+#     hyper = list(
+#       prec = list(prior="pc.prec", param=c(1, 0.01)),
+#     )
+#   )
+# 
+# fit_interaction_rw <- inla(
+#   formula = form_interaction_rw,
+#   data    = dt_q,
+#   family  = "poisson",
+#   E       = dt_q$E_pop,   # ★ 인구를 기대노출로
+#   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+#   control.predictor = list(link=1, compute=TRUE),
+#   control.inla      = list(strategy="simplified.laplace",
+#                            int.strategy = "auto",
+#                            control.vb=list(emergency=50))
+# )
+# 
+# summary(fit_interaction_rw)
+# fit_interaction_rw$waic$waic; fit_interaction_rw$dic$dic
 
 ```
 
 ### Model Comparison
 
 ```{r}
-data.frame(
-  model = c("baseline_rw1", "baseline_ar1", "rw1+cov", "bym2_ar1","interaction","bym2_ar1+cov"),
-  WAIC  = c(fit_baseline_q$waic$waic,
-            fit_ar1$waic$waic,
-            fit_rw1cov_q$waic$waic,
-            fit_bym2_ar1$waic$waic,
-            fit_interaction$waic$waic,
-            fit_cov_q$waic$waic),
-  DIC   = c(fit_baseline_q$dic$dic,
-            fit_ar1$dic$dic,
-            fit_rw1cov_q$dic$dic,
-            fit_bym2_ar1$dic$dic,
-            fit_interaction$dic$dic,
-            fit_cov_q$dic$dic)
+## 0) INLA fit 객체들 한 번에 모으기
+fits_q <- list(
+  baseline_rw1   = fit_baseline_q,
+  baseline_ar1   = fit_ar1,
+  bym2_ar1       = fit_bym2_ar1,
+  interaction    = fit_interaction,
+  bym2_ar1_cov   = fit_cov_q
 )
 
-# PIT/요약
-hist(fit_bym2_ar1$cpo$pit, breaks=30, main="PIT (BYM2+AR1)")
+## 1) WAIC, DIC 뽑아서 data.frame으로 만드는 헬퍼
+extract_criteria <- function(fit_list) {
+  data.frame(
+    model = names(fit_list),
+    WAIC  = sapply(fit_list, function(x) x$waic$waic),
+    DIC   = sapply(fit_list, function(x) x$dic$dic),
+    row.names = NULL
+  )
+}
+
+## 사용
+crit_q <- extract_criteria(fits_q)
+crit_q
 ```
 
-```{r}
-dt_y <- dt_y %>%
-  mutate(sex_ratio = as.numeric(scale(population_male / population_female)))
-```
-
+## yearly
+#### short (for grdp)
 ```{r}
 dt_y <- dt_y %>%
   filter(year <= 2021) %>%
   arrange(canon_group_id, date)
 ```
 
+### AR1
+```{r}
+form_ar1 <- e9 ~ 1 +
+  f(time_id_year, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))     # AR(1) 상관 PC prior
+    )
+  )
 
-## yearly
+# 3) 공변량 추가한 공식
+form_ar1cov_y <- add_covariates(form_ar1)
+
+# 4) 적합 (E= 방식; offset 쓰지 않음)
+fit_ar1cov_y <- inla(
+  formula = form_ar1cov_y,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$lf_employed_thousand,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+summary(fit_ar1cov_y)
+fit_ar1cov_y$waic$waic; fit_ar1cov_y$dic$dic
+```
+
+### BYM2 * AR1
 ```{r}
 form_interaction_y <- e9 ~ 1 +
-  # # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
+  # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
   f(space_id, model="bym2", graph=G, scale.model=TRUE,
     hyper = list(
       prec = list(prior="pc.prec", param=c(1, 0.01)),
@@ -624,30 +699,14 @@ form_interaction_y <- e9 ~ 1 +
   )
 
 # 3) 공변량 추가한 공식
-form_cov_y <- update(form_interaction_y, . ~ . + 
-                       sex_ratio_z +
-                       pop_65plus_z +
-                       trade_balance_z +
-                       mig_total_out_z +
-                       # grdp_1st_z +
-                       # grdp_2nd_z +
-                       # grdp_3rd_z +
-                       ind_ratio_manufacturing_z +
-                       ind_ratio_construction_z +
-                       ind_ratio_wholesale_retail_z +
-                       lf_employment_rate_15_64 +
-                       dummy_covid +
-                       dummy_capital +
-                       dummy_si +
-                       dummy_gun
-                     )
+form_cov_y <- add_covariates(form_interaction_y)
 
 # 4) 적합 (E= 방식; offset 쓰지 않음)
 fit_cov_y <- inla(
   formula = form_cov_y,
   data    = dt_y,
   family  = "poisson",
-  E       = dt_y$population_total,   # ★ 인구를 기대노출로
+  E       = dt_y$n_workers,   # ★ 인구를 기대노출로
   control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
   control.predictor = list(link=1, compute=TRUE),
   control.inla      = list(strategy="simplified.laplace",
@@ -659,7 +718,239 @@ fit_cov_y <- inla(
 summary(fit_cov_y)
 fit_cov_y$waic$waic; fit_cov_y$dic$dic
 ```
+
+### BYM2 * AR1 for e9-1(manufacturing)
+```{r}
+form_interaction_y <- e9_1 ~ 1 +
+  # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
+  f(space_id, model="bym2", graph=G, scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )) +
+  # 메인 시간효과
+  f(time_id_year, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    )) +
+  # 공간×시간 상호작용: BYM2를 시간별 복제, 시간 간 AR(1)로 연결
+  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+    group = time_id_year,
+    control.group = list(model="ar1",
+                         hyper = list(
+                           theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+                           rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+                         )),
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )
+  )
+
+# 3) 공변량 추가한 공식
+form_cov_y <- add_covariates(form_interaction_y)
+
+# 4) 적합 (E= 방식; offset 쓰지 않음)
+fit_cov_y <- inla(
+  formula = form_cov_y,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$lf_econ_active_thousand * 1000,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           int.strategy = "auto",
+                           control.vb=list(emergency=50)),
+  verbose = TRUE
+)
+
+summary(fit_cov_y)
+fit_cov_y$waic$waic; fit_cov_y$dic$dic
+```
+
+## Others
+### SVC
+```{r}
+# (1) 공간 SVC용 인덱스
+dt_y$space_id_svc_1 <- dt_y$space_id
+dt_y$space_id_svc_2 <- dt_y$space_id
+
+dt_y$x_1st_svc   <- scale(dt_y$grdp_1st_dev, center=TRUE, scale=FALSE)
+dt_y$x_2nd_svc   <- scale(dt_y$grdp_2nd_dev, center=TRUE, scale=FALSE)
+
+# # (2) 시공간 SVC를 쓰려면 (선택)
+# dt_y$space_id_svc_st <- dt_y$space_id_st
+# dt_y$x_manu_svc_st   <- dt_y$ind_ratio_manufacturing
+
+```
+
+```{r}
+form_svc_y <- update(
+  form_cov_y,
+  . ~ . +
+    f(space_id_svc_1, x_1st_svc,
+      model = "bym2", graph = G, scale.model = TRUE,
+      hyper = list(
+        prec = list(prior = "pc.prec", param = c(1, 0.01)),
+        phi  = list(prior = "pc",      param = c(0.5, 0.5))
+      )) +
+    f(space_id_svc_2, x_2nd_svc,
+      model = "bym2", graph = G, scale.model = TRUE,
+      hyper = list(
+        prec = list(prior = "pc.prec", param = c(1, 0.01)),
+        phi  = list(prior = "pc",      param = c(0.5, 0.5))
+      ))
+)
+
+fit_svc_y <- inla(
+  formula = form_svc_y,   # or form_svc_st
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$lf_econ_active_thousand,
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(
+    strategy    = "simplified.laplace",
+    int.strategy = "auto",
+    control.vb  = list(emergency=50)
+  ),
+  verbose = TRUE
+)
+
+summary(fit_svc_y)
+```
+
+```{r}
+library(dplyr)
+
+# 1) 1차 산업 비중 공통 기울기 (고정효과)
+beta_manu <- fit_svc_y$summary.fixed["grdp_2nd_dev", "mean"]
+beta_manu
+
+# 2) SVC 랜덤효과 (시군구별 편차 b_i)
+svc_raw <- as.data.frame(fit_svc_y$summary.random$space_id_svc_2)
+
+svc_coef <- svc_raw[1:max(dt_y$space_id_svc_2), ] 
+
+svc_coef <- svc_coef %>%
+  select(ID, mean, sd, `0.025quant`, `0.975quant`) %>%
+  rename(
+    space_id   = ID,
+    b_mean     = mean,
+    b_sd       = sd,
+    b_lcl      = `0.025quant`,
+    b_ucl      = `0.975quant`
+  ) %>%
+  mutate(
+    beta_i      = beta_manu + b_mean,      # 시군구별 기울기
+    beta_i_lcl  = beta_manu + b_lcl,
+    beta_i_ucl  = beta_manu + b_ucl,
+    irr         = exp(beta_i),             # 기울기를 IRR로 보고 싶으면
+    irr_lcl     = exp(beta_i_lcl),
+    irr_ucl     = exp(beta_i_ucl)
+  )
+```
+
+```{r}
+library(sf)
+
+sgg_slope <- sgg %>%
+  left_join(svc_coef, by = c("idx" = "space_id"))
+
+# 잘 붙었는지 확인
+sgg_slope %>%
+  st_drop_geometry() %>%
+  select(idx, new_sigungu_nm, beta_i, irr) %>%
+  head()
+```
+```{r}
+library(ggplot2)
+
+ggplot(sgg_slope) +
+  geom_sf(aes(fill = beta_i), color = NA) +
+  scale_fill_gradient2(midpoint = 0, low = "blue", mid = "white", high = "red") +
+  theme_minimal() +
+  labs(
+    title    = "전국대비 2차산업 비중 기울기 (SVC)",
+    fill     = "β_i"
+  )
+```
+
+
+### RR
+```{r}
+fit_baseline_q <- inla(
+  RR ~ 1 + offset(log(population_total)) + 
+  f(time_id, model = "ar1",# scale.model = TRUE,
+             hyper = list(prec = list(prior = "pc.prec", param = c(1, 0.01)))),
+  data = dt_q,
+  family = "lognormal",
+  # E = dt_q$E_e9,
+  # offset = log(dt_q$population_total),   # ← 여기!
+  control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE),
+  control.inla      = list(strategy = "simplified.laplace",
+                            improved.simplified.laplace = TRUE,
+                           control.vb = list(strategy = "mean")),
+  verbose = TRUE
+)
+
+summary(fit_baseline_q)
+```
+
 ## Prediction
+### test
+```{r}
+library(INLA)
+
+## 0) 마스킹 연도 정의
+mask_year <- 2023:2025
+
+## 1) 관측치 + 마스킹된 응답 변수 만들기
+dt_y$e9_obs <- dt_y$e9
+dt_y$e9_obs[dt_y$year %in% mask_year] <- NA  # 2023–2025는 NA로 처리 → 학습에는 안 쓰이고 예측만 됨
+
+## 2) 기존 모형의 공식에서 응답변수만 e9_obs로 교체
+# 이미 만들어둔 form_cov_y 를 그대로 쓰되, 좌변만 e9_obs로 바꿈
+form_cov_y_mask <- update(form_cov_y, e9_obs ~ .)
+
+## 3) INLA 적합 (학습: 2013–2022, 예측: 2023–2025)
+fit_cov_y_mask <- inla(
+  formula = form_cov_y_mask,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$population_total,   # 인구를 기대노출로 (그대로 유지)
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link = 1, compute = TRUE),
+  control.inla      = list(
+    strategy   = "simplified.laplace",
+    int.strategy = "auto",
+    control.vb = list(emergency = 50)
+  ),
+  verbose = TRUE
+)
+
+## 4) 마스킹 연도에 대한 예측값 추출
+idx_mask <- which(dt_y$year %in% mask_year)
+
+# summary.fitted.values의 mean은 E[Y] (예상 e9 카운트)
+pred_mean_mask <- fit_cov_y_mask$summary.fitted.values$mean[idx_mask]
+
+# 실제 관측 값 (원래 e9)
+obs_mask <- dt_y$e9[idx_mask]
+
+## 5) MSE 계산
+mse_mask <- mean((pred_mean_mask - obs_mask)^2, na.rm = TRUE)
+mse_mask
+
+```
+
+```{r}
+pred_mean_mask; 
+```
+
+
 ### lagged cov.
 ```{r}
 library(dplyr)
