@@ -81,87 +81,109 @@ st_write(
 
 
 
-### Visualization of SPM
+### 1st order Queen
 
 ```{r}
 library(sf)
+library(dplyr)
 library(spdep)
-if (st_is_longlat(sgg)) sgg <- st_transform(sgg, 5179)
+library(Matrix)
 
-# rook adjacency
-nb_geo <- poly2nb(sgg, queen=FALSE, snap=1e-3)
+# # 1) merged sgg 로드 + 정렬 + idx
+# sgg <- st_read("sgis_sgg_merged/SGG_merged.gpkg", quiet = TRUE)
+# 
+# if (st_is_longlat(sgg)) sgg <- st_transform(sgg, 5179)
+# 
+# sgg <- sgg %>%
+#   arrange(new_sigungu_cd) %>%
+#   mutate(idx = row_number())
 
-# coords for kNN fallback
+sgg <- sgg_idx
+
+path_q <- "dt_q_mod.csv"
+dt_q <- read.csv(
+  path_q,
+  fileEncoding = "euc-kr",   # 파일이 euc-kr로 저장됨
+  stringsAsFactors = FALSE
+)
+setDT(dt_q)
+
+dt_q <- dt_q %>%
+  mutate(new_sigungu_cd = sgg_code_sgis)
+
+# (선택) 실제 분석 데이터(dt_q)에 존재하는 시군구만 남기기
+# dt_q에 new_sigungu_cd가 있다면 이게 가장 안전함
+if ("new_sigungu_cd" %in% names(dt_q)) {
+  keep_codes <- sort(unique(dt_q$new_sigungu_cd))
+  sgg <- sgg %>%
+    filter(new_sigungu_cd %in% keep_codes) %>%
+    arrange(new_sigungu_cd) %>%
+    mutate(idx = row_number())
+}
+
+N <- nrow(sgg)
+cat("Graph N =", N, "\n")
+
+sf::sf_use_s2(FALSE)
+
+# 1) 투영 + 유효화
+sgg2 <- sgg |>
+  st_zm(drop = TRUE, what = "ZM") |>
+  st_make_valid() |>
+  st_transform(5179)
+
+sgg_nb_s <- st_simplify(sgg2, dTolerance = 50, preserveTopology = TRUE)
+
+# 4) rook 인접 (5179이므로 snap은 '미터' 단위)
+system.time({
+  nb_geo <- poly2nb(sgg_nb_s, queen = TRUE, snap = 1)  # 1m
+})
+
 coords <- st_coordinates(st_point_on_surface(sgg))
-knn1 <- knn2nb(knearneigh(coords, k=1))
+knn1   <- knn2nb(knearneigh(coords, k = 1))
 
-# combine
-nb_final <- union.nb(nb_geo, knn1)
-nb_final <- make.sym.nb(nb_final)
+nb_final <- make.sym.nb(union.nb(nb_geo, knn1))
 
-lw <- nb2listw(nb_final, style="W", zero.policy=TRUE)
+# 3) adjacency matrix (binary) → INLA graph
+W <- nb2mat(nb_final, style = "B", zero.policy = TRUE)
+stopifnot(all(dim(W) == c(N, N)))
 
-print(n.comp.nb(nb_final)$nc)
+INLA::inla.write.graph(W, file = "sgg_graph.adj")
+G <- INLA::inla.read.graph("sgg_graph.adj")
+
+# 4) 매핑 저장: 코드 ↔ idx
+write.csv(
+  data.frame(idx = sgg$idx, new_sigungu_cd = sgg$new_sigungu_cd),
+  "sgg_graph_nodes.csv",
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
 ```
 
 ```{r}
-library(sf)
-library(spdep)
-library(dplyr)
-library(purrr)
-library(ggplot2)
-
-# -------------------------------------------------------
-# 0. sgg (sf) + lw(listw) 준비
-# -------------------------------------------------------
-sgg <- st_read("sgis_sgg_merged/SGG_merged.gpkg", quiet = TRUE)  # 이미 준비된 sf
-# lw <- nb2listw(nb_final, style="B", zero.policy=TRUE)
-
-# 안전: 좌표계 변환
-if (st_is_longlat(sgg)) {
-  sgg <- st_transform(sgg, 5179)
-}
-
-# 인덱스 고정
-sgg <- sgg |>
-  arrange(new_sigungu_cd) |>
+# (중요) nb를 만들 때 사용했던 sgg와 "행 순서"가 동일해야 함
+# 대표점: 폴리곤 내부 보장 -> point_on_surface 추천
+cent <- st_point_on_surface(sgg) %>% 
+  st_as_sf() %>% 
   mutate(idx = row_number())
 
-# centroid
-cent <- st_point_on_surface(sgg)
 coords <- st_coordinates(cent)
 
-# -------------------------------------------------------
-# 1. lw(listw) → edge list 생성
-# -------------------------------------------------------
+# nb(list) -> edge list (중복 제거 위해 i < j)
+edge_df <- do.call(rbind, lapply(seq_along(nb_final), function(i) {
+  js <- nb_final[[i]]
+  if (length(js) == 0) return(NULL)
+  data.frame(i = i, j = js)
+}))
+edge_df <- subset(edge_df, i < j)
 
-nb <- lw$neighbours  # neighbour list
-n  <- length(nb)
-
-edge_df <- map2_dfr(
-  .x = seq_len(n),
-  .y = nb,
-  .f = ~{
-    if (!length(.y)) return(NULL)
-    tibble(from = .x, to = .y)
-  }
-) |> filter(from < to)
-
-# LINESTRING 생성
-line_list <- map(seq_len(nrow(edge_df)), function(k) {
-  i <- edge_df$from[k]
-  j <- edge_df$to[k]
-  st_linestring(rbind(coords[i,], coords[j,]))
+# edge -> LINESTRING
+lines <- lapply(seq_len(nrow(edge_df)), function(k) {
+  i <- edge_df$i[k]; j <- edge_df$j[k]
+  st_linestring(rbind(coords[i, 1:2], coords[j, 1:2]))
 })
 
-skeleton <- st_sf(
-  edge_df,
-  geometry = st_sfc(line_list, crs = st_crs(sgg))
-)
-
-# -------------------------------------------------------
-# 2. 시각화
-# -------------------------------------------------------
+skeleton <- st_as_sf(st_sfc(lines, crs = st_crs(sgg)))
 
 g <- ggplot() +
   geom_sf(data = sgg, fill = NA, color = "grey40", linewidth = 0.3) +
@@ -171,49 +193,275 @@ g <- ggplot() +
   coord_sf()
 
 print(g)
-
-# -------------------------------------------------------
-# 3. 고해상도 저장
-# -------------------------------------------------------
 ggsave("SGG_adj_from_lw.png", g,
-       width = 11, height = 11, dpi = 600)
-
-# ggsave("SGG_adj_from_lw.pdf", g,
-#        width = 11, height = 11)
-
+       width = 11, height = 11, dpi = 300)
 ```
-
-### conversion to graph
+### 2nd order Queen
 
 ```{r}
-# install.packages(c("sf","spdep","Matrix"))
-library(sf)
-library(spdep)
-library(Matrix)
+# ============================================================
+# 2차(누적) Queen 인접 + (고립만) kNN=1 보정 + INLA graph 저장
+# ============================================================
 
-# 희소행렬(dgCMatrix)로 추출
-W <- listw2mat(lw)        # base matrix
-W <- Matrix(W, sparse=TRUE)
+suppressPackageStartupMessages({
+  library(sf)
+  library(dplyr)
+  library(spdep)
+  library(Matrix)
+  library(data.table)
+  library(INLA)
+})
 
-# 4) INLA 그래프 파일/객체 -----------------------------------------------------
-# INLA는 인접 리스트 파일(.adj) 또는 행렬에서 그래프를 읽을 수 있음
-# (버전 따라 행렬 직접 read가 안될 수 있어 안전하게 파일로 저장)
-# INLA::inla.write.graph(as.matrix(W > 0), file = "sgg_graph.adj")
-G <- INLA::inla.read.graph("sgg_graph.adj")
+# ----------------------------
+# 0) sgg 준비
+# ----------------------------
+sgg <- sgg_idx
 
-# 6) 출력 요약 ------------------------------------------------------------------
-cat("N =", nrow(sgg_merged),
-    "\nEdges =", sum(card(nb)),
-    "\nIslands after fix =", sum(card(nb) == 0),
-    "\nW dim =", paste(dim(W), collapse=" x "), "\n")
+# ----------------------------
+# 1) 분석 데이터 로드 + 시군구 필터링/정렬
+# ----------------------------
+path_q <- "dt_q_mod.csv"
+dt_q <- read.csv(path_q, fileEncoding = "euc-kr", stringsAsFactors = FALSE)
+data.table::setDT(dt_q)
 
-# 7) ID 순서(중요) -------------------------------------------------------------
-# BYM2 등에 넣을 때, 모델 데이터의 공간 인덱스 순서가
-# sgg_merged의 row 순서(= nb/W 순서)와 일치해야 합니다.
-# 안전하게 키를 벡터로 저장해두세요:
-write.csv(data.frame(node_index = seq_len(nrow(sgg_merged)),
-                     sgg_code = sgg_merged[[id_col]]),
-          "sgg_graph_nodes.csv", row.names = FALSE, fileEncoding = "UTF-8")
+dt_q <- dt_q %>% mutate(new_sigungu_cd = sgg_code_sgis)
+
+if ("new_sigungu_cd" %in% names(dt_q)) {
+  keep_codes <- sort(unique(dt_q$new_sigungu_cd))
+  sgg <- sgg %>%
+    filter(new_sigungu_cd %in% keep_codes) %>%
+    arrange(new_sigungu_cd) %>%
+    mutate(idx = row_number())
+}
+
+N <- nrow(sgg)
+cat("Graph N =", N, "\n")
+
+# ----------------------------
+# 2) Geometry 정리 (5179, valid)
+# ----------------------------
+sf::sf_use_s2(FALSE)
+
+sgg2 <- sgg |>
+  st_zm(drop = TRUE, what = "ZM") |>
+  st_make_valid() |>
+  st_transform(5179)
+
+# (선택) 단순화 (인접 바뀔 수 있으니 보수적으로)
+sgg_nb_s <- st_simplify(sgg2, dTolerance = 50, preserveTopology = TRUE)
+
+ids <- as.character(sgg2$new_sigungu_cd)
+
+# ----------------------------
+# 3) Queen 1차 + 2차(누적) 인접 만들기
+# ----------------------------
+t_nb <- system.time({
+  nb_q1 <- poly2nb(
+    sgg_nb_s,
+    queen = TRUE,
+    snap = 1,                 # meter
+    row.names = ids
+  )
+})
+print(t_nb)
+
+# 2차 lag 생성
+lags <- spdep::nblag(nb_q1, maxlag = 2)
+
+# 1차+2차 누적(보통 말하는 "2차 인접 누적")
+nb_tmp <- spdep::nblag_cumul(lags)[[2]]
+
+# ---- 여기서 nb 객체로 "정규화" (중요) ----
+if (!inherits(nb_tmp, "nb")) {
+  if (is.list(nb_tmp) && length(nb_tmp) == N) {
+    nb_tmp <- lapply(nb_tmp, function(v) as.integer(v))
+    class(nb_tmp) <- "nb"
+    attr(nb_tmp, "region.id") <- ids
+  } else {
+    stop("nblag_cumul(lags)[[2]] 결과가 nb로 해석되지 않습니다. 객체 구조를 확인하세요.")
+  }
+}
+nb_geo_2 <- nb_tmp
+
+cat("class(nb_geo_2) =", paste(class(nb_geo_2), collapse = ", "), "\n")
+
+# ----------------------------
+# 4) isolate 보정: 고립된 것만 kNN=1로 연결
+# ----------------------------
+coords <- st_coordinates(st_point_on_surface(st_geometry(sgg2)))  # 경고 최소화
+
+knn1 <- knn2nb(
+  knearneigh(coords, k = 1),
+  row.names = ids
+)
+
+iso <- which(spdep::card(nb_geo_2) == 0)
+cat("isolates (before fix) =", length(iso), "\n")
+
+if (length(iso) > 0) {
+  nb_fix <- nb_geo_2
+  for (i in iso) nb_fix[[i]] <- knn1[[i]]
+  nb_final_2 <- make.sym.nb(nb_fix)
+} else {
+  nb_final_2 <- make.sym.nb(nb_geo_2)
+}
+
+cat("isolates (after fix)  =", sum(spdep::card(nb_final_2) == 0), "\n")
+cat("components (before) =", n.comp.nb(nb_geo_2)$nc, "\n")
+cat("components (after)  =", n.comp.nb(nb_final_2)$nc, "\n")
+
+# ----------------------------
+# 5) adjacency matrix (binary) → INLA graph 저장
+# ----------------------------
+W <- nb2mat(nb_final_2, style = "B", zero.policy = TRUE)
+stopifnot(all(dim(W) == c(N, N)))
+
+INLA::inla.write.graph(W, file = "sgg_graph_2.adj")
+G <- INLA::inla.read.graph("sgg_graph_2.adj")
+
+# ----------------------------
+# 6) 매핑 저장: 코드 ↔ idx
+# ----------------------------
+write.csv(
+  data.frame(idx = sgg$idx, new_sigungu_cd = sgg$new_sigungu_cd),
+  "sgg_graph_nodes_2.csv",
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat("DONE: sgg_graph_2.adj / sgg_graph_nodes_2.csv\n")
+
+
 ```
 
+```{r}
+# (중요) nb를 만들 때 사용했던 sgg와 "행 순서"가 동일해야 함
+# 대표점: 폴리곤 내부 보장 -> point_on_surface 추천
+cent <- st_point_on_surface(sgg) %>% 
+  st_as_sf() %>% 
+  mutate(idx = row_number())
+
+coords <- st_coordinates(cent)
+
+# nb(list) -> edge list (중복 제거 위해 i < j)
+edge_df <- do.call(rbind, lapply(seq_along(nb_final_2), function(i) {
+  js <- nb_final[[i]]
+  if (length(js) == 0) return(NULL)
+  data.frame(i = i, j = js)
+}))
+edge_df <- subset(edge_df, i < j)
+
+# edge -> LINESTRING
+lines <- lapply(seq_len(nrow(edge_df)), function(k) {
+  i <- edge_df$i[k]; j <- edge_df$j[k]
+  st_linestring(rbind(coords[i, 1:2], coords[j, 1:2]))
+})
+
+skeleton <- st_as_sf(st_sfc(lines, crs = st_crs(sgg)))
+
+g2 <- ggplot() +
+  geom_sf(data = sgg, fill = NA, color = "grey40", linewidth = 0.3) +
+  geom_sf(data = skeleton, color = "steelblue", linewidth = 0.3, alpha = 0.7) +
+  geom_sf(data = cent, color = "red", size = 1.1) +
+  theme_void() +
+  coord_sf()
+
+print(g2)
+ggsave("SGG_adj_from_lw_queen2.png", g2,
+       width = 11, height = 11, dpi = 300)
+```
+
+### distance-based
+```{r}
+library(sf)
+library(dplyr)
+library(spdep)
+library(Matrix)
+library(ggplot2)
+
+sf::sf_use_s2(FALSE)
+
+# sgg: (중요) dt_q로 필터링/정렬된 동일 객체라고 가정
+sgg_use <- sgg |>
+  st_zm(drop = TRUE, what = "ZM") |>
+  st_make_valid() |>
+  st_transform(5179)
+
+N <- nrow(sgg_use)
+
+# 대표점(폴리곤 내부 보장)
+cent  <- st_point_on_surface(sgg_use)
+coords <- st_coordinates(cent)  # (N x 2), 단위: meter
+
+# ----------------------------
+# (1) 거리 기반 이웃: threshold
+# ----------------------------
+dmax <- 60000  # 예: 60km (meter)
+nb_d <- dnearneigh(coords, d1 = 0, d2 = dmax, longlat = FALSE)
+
+# 고립 방지(필수 권장): 1-NN을 union
+knn1 <- knn2nb(knearneigh(coords, k = 1))
+nb_d <- make.sym.nb(union.nb(nb_d, knn1))
+
+# ----------------------------
+# (2) 거리감쇠 가중치: exp(-d/r)
+# ----------------------------
+dlist <- nbdists(nb_d, coords)
+
+range_m <- 30000  # 감쇠 스케일(예: 30km). 값 커질수록 완만해짐
+wlist  <- lapply(dlist, function(d) exp(-d / range_m))
+
+# INLA용: weighted adjacency sparse matrix (대칭화)
+i <- rep(seq_along(nb_d), card(nb_d))
+j <- unlist(nb_d)
+w <- unlist(wlist)
+
+Ww <- sparseMatrix(i = i, j = j, x = w, dims = c(N, N))
+Ww <- (Ww + t(Ww)) / 2
+diag(Ww) <- 0
+
+INLA::inla.write.graph(Ww, file = "sgg_graph_dist.adj")
+G_dist <- INLA::inla.read.graph("sgg_graph_dist.adj")
+
+# (선택) 매핑 저장
+write.csv(
+  data.frame(idx = seq_len(N), new_sigungu_cd = sgg_use$new_sigungu_cd),
+  "sgg_graph_nodes_dist.csv",
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+# ----------------------------
+# (3) 스켈레톤 시각화 (가중치 반영 alpha)
+# ----------------------------
+edge_df <- do.call(rbind, lapply(seq_along(nb_d), function(ii) {
+  js <- nb_d[[ii]]
+  if (!length(js)) return(NULL)
+  data.frame(i = ii, j = js, w = wlist[[ii]])
+}))
+edge_df <- subset(edge_df, i < j)
+
+lines <- lapply(seq_len(nrow(edge_df)), function(k) {
+  ii <- edge_df$i[k]; jj <- edge_df$j[k]
+  st_linestring(rbind(coords[ii, 1:2], coords[jj, 1:2]))
+})
+
+skeleton <- st_as_sf(st_sfc(lines, crs = st_crs(sgg_use))) |>
+  mutate(w = edge_df$w)
+
+cent_sf <- st_as_sf(st_sfc(st_multipoint(coords), crs = st_crs(sgg_use))) |>
+  st_cast("POINT") |>
+  mutate(idx = seq_len(N))
+
+g <- ggplot() +
+  geom_sf(data = sgg_use, fill = NA, color = "grey40", linewidth = 0.3) +
+  geom_sf(data = skeleton, aes(alpha = w), color = "steelblue", linewidth = 0.3) +
+  geom_sf(data = cent_sf, color = "red", size = 1.1) +
+  scale_alpha(range = c(0.2, 0.9), guide = "none") +
+  theme_void()
+
+print(g)
+ggsave("SGG_dist_skeleton.png", g, width = 11, height = 11, dpi = 300)
+
+```
 

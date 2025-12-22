@@ -12,6 +12,7 @@ library(showtext)
 # 한글 폰트 추가 (구글 Noto Sans KR)
 font_add_google("Noto Sans KR", "noto")
 showtext_auto()
+showtext_opts(dpi = 300)
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
@@ -41,7 +42,7 @@ library(rlang)
 inla.setOption(inla.mode = "experimental")
 
 # 경로: 파일을 알맞게 지정하세요
-path <- "panel_full_12.csv"
+path <- "panel_full_13.csv"
 
 dt <- fread(path, encoding = "UTF-8")
 
@@ -111,8 +112,8 @@ idx <- with(
 dt$e9[idx] <- 1107
 
 # RR 계산
-dt$E_e9 <- dt$population_total * (sum(dt$e9) / sum(dt$population_total))
-dt$RR <- dt$e9 / dt$E_e9
+dt$lf_econ_active <- dt$lf_econ_active_thousand * 1000
+dt$IR <- dt$e9 / dt$total_emp
 
 # 성비 계산
 dt <- dt %>%
@@ -223,32 +224,47 @@ dt_q <- dt_q %>%
   filter(!(E_pop <= 0 & e9 > 0))
 
 # 3) 시군구/시도 ID 생성 --------------------------------------------
-# dt_q 안에 이미 canonical 코드/이름이 있다고 가정:
-#   - sgg_code10  : 시군구 10자리 코드
-#   - canon_sido_name : 시도 이름 (예: '경상남도', '강원특별자치도')
 dt_q <- dt_q %>%
-  mutate(
-    sgg_id  = as.integer(factor(sgg_code10)),       # 시군구 random effect용
-    sido_id = as.integer(factor(canon_sido_name))   # 시도 random effect용
-  )
+  mutate(sgg_code_sgis = as.character(sgg_code_sgis))
 
-# 4) 공간 인덱스 맞추기
+# (권장) sgg는 merged.gpkg를 읽은 뒤, dt_q에 존재하는 코드만 남기고 idx 재부여
+sgg_idx <- sgg %>%
+  mutate(new_sigungu_cd = as.character(new_sigungu_cd)) %>%
+  filter(new_sigungu_cd %in% unique(dt_q$sgg_code_sgis)) %>%
+  arrange(new_sigungu_cd) %>%
+  mutate(idx = row_number())
+
+# 매칭 누락 체크(중요)
+missing_codes <- setdiff(unique(dt_q$sgg_code_sgis), sgg_idx$new_sigungu_cd)
+if (length(missing_codes) > 0) {
+  warning("sgg에 매칭되지 않는 sgg_code_sgis가 있습니다. 예: ",
+          paste(head(missing_codes, 10), collapse = ", "),
+          ifelse(length(missing_codes) > 10, " ...", ""))
+}
+
+# dt_q에 idx 붙이기 → 이게 곧 space_id
 dt_q <- dt_q %>%
-  mutate(sgg_code_sgis = as.character(sgg_code_sgis)) %>%
   left_join(
-    sgg %>%
-      st_drop_geometry() %>%              # geometry 빼고
-      transmute(
-        sgg_code_sgis    = new_sigungu_cd,  # dt_q의 키 이름으로 맞추기
-        idx
-      ),
+    sgg_idx %>% st_drop_geometry() %>% transmute(sgg_code_sgis = new_sigungu_cd, idx),
     by = "sgg_code_sgis"
   ) %>%
-  arrange(time_id, idx) %>%
+  filter(!is.na(idx)) %>%              # 매칭 실패 행은 제거(또는 따로 처리)
   mutate(
-    space_id    = idx,
-    space_id_st = idx
-  )
+    space_id    = as.integer(idx),
+    space_id_st = as.integer(idx)      # ST 상호작용 index는 공간 인덱스로 (group=time_id로 시간 연결)
+  ) %>%
+  arrange(time_id, space_id)
+
+# 공간 수 확인: dt_q의 space_id 범위와 sgg_idx 행 수가 같아야 함
+n_space <- n_distinct(dt_q$space_id)
+stopifnot(n_space == nrow(sgg_idx))
+stopifnot(setequal(sort(unique(dt_q$space_id)), seq_len(n_space)))
+
+cat(sprintf("[공간 인덱스] 공간=%d (sgg_idx nrow=%d), 분기=%d, nrow(dt_q)=%d\n",
+            n_space, nrow(sgg_idx), n_time, nrow(dt_q)))
+
+# 이제부터는 sgg 대신 sgg_idx를 "모델용 지도"로 쓰는 게 안전
+sgg <- sgg_idx
 ```
 
 
@@ -425,7 +441,7 @@ plot_sgg_var <- function(dt,
                          low  = "grey95",
                          high = "steelblue",
                          fill_label = NULL,
-                         base_size = 24,      # 글자 크기 기본값
+                         base_size = 14,      # 글자 크기 기본값
                          width = 6, height = 5, dpi = 300) {
 
   var_quo <- enquo(var)
@@ -481,17 +497,17 @@ plot_sgg_var <- function(dt,
 plot_sgg_var(dt_q, sgg, var = grdp_1st_dev, time_value = 201312)
 ```
 ```{r}
-plot_sgg_var(dt_q, sgg, var = e9)
-plot_sgg_var(dt_q, sgg, var = e9_1)
-plot_sgg_var(dt_q, sgg, var = e9_2)
-plot_sgg_var(dt_q, sgg, var = RR)
+plot_sgg_var(dt_q, sgg, var = e9, time_value=202112)
+# plot_sgg_var(dt_q, sgg, var = e9_1)
+# plot_sgg_var(dt_q, sgg, var = e9_2)
+plot_sgg_var(dt_y, sgg, var = IR, time_value=202112)
 
 ```
 ```{r}
 top10_regions <- dt_y %>%
-  filter(yyyymm == 202112) %>%           # 2025년 6월 데이터만 필터링
-  arrange(desc(RR)) %>%                  # RR 내림차순 정렬 (높은 순)
-  select(canon_sigungu_name, RR, e9, E_e9) %>% # 지역명, RR, 관측값, 기대값 확인
+  filter(yyyymm == 202112) %>%          
+  arrange(desc(IR)) %>%                  # RR 내림차순 정렬 (높은 순)
+  select(canon_sigungu_name, IR, e9, total_emp) %>% # 지역명, RR, 관측값, 기대값 확인
   head(10)                               # 상위 10개 추출
 
 # 결과 출력
@@ -520,7 +536,7 @@ time_labels <- dt_q %>%
   arrange(time_id)
 
 # 4. 시각화 (Spaghetti Plot)
-ggplot(subset_data, aes(x = time_id, y = RR, group = sgg_code10)) +
+f1 <- ggplot(subset_data, aes(x = time_id, y = IR, group = sgg_code10)) +
   # (1) 개별 시군구의 선 그리기 (투명도 조절 필수)
   geom_line(alpha = 0.3, color = "steelblue") + 
   
@@ -529,8 +545,8 @@ ggplot(subset_data, aes(x = time_id, y = RR, group = sgg_code10)) +
   
   # (3) 축 및 테마 설정
   scale_x_continuous(
-    breaks = time_labels$time_id[seq(1, nrow(time_labels), by = 2)], # 라벨이 너무 많으면 2칸씩 띄움
-    labels = time_labels$yq[seq(1, nrow(time_labels), by = 2)]
+    breaks = time_labels$time_id[seq(1, nrow(time_labels), by = 8)], # 라벨이 너무 많으면 2칸씩 띄움
+    labels = time_labels$yq[seq(1, nrow(time_labels), by = 8)]
   ) +
   # y축을 로그 스케일로 보면 변동폭 확인이 더 용이함 (필요시 주석 해제)
   # scale_y_log10() + 
@@ -539,12 +555,195 @@ ggplot(subset_data, aes(x = time_id, y = RR, group = sgg_code10)) +
   theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
   
   labs(
-    title = "Relative Risk (RR) Trends of 100 Randomly Selected Regions",
+    title = "Incidence Rate (IR) Trends of 100 Randomly Selected Regions",
     subtitle = "Blue lines: Individual regions, Red line: Smoothed average trend",
     x = NULL, 
-    y = "Relative Risk (RR)"
-  )
+    y = "Incidence Rate (IR)"
+  ) +
+  theme_bw(base_size = 14)
+
+f1
+
+ggsave("time_series.png", f1, dpi = 300)
 ```
+
+```{r}
+# =========================================================
+# E-9 산업구성 시각화 (분기별)
+# - e9: 총합
+# - e9_1 제조업 / e9_2 건설업 / e9_3 농업 / e9_4 임업 / e9_98 과거합법조치
+# - 나머지 e9_*: 기타
+# =========================================================
+
+library(tidyverse)
+library(zoo)
+library(scales)
+
+# 0) 데이터 로드
+# (파일 인코딩이 EUC-KR/CP949인 경우가 많아서 locale 지정)
+dt <- readr::read_csv(
+  "dt_q_mod.csv",
+  locale = readr::locale(encoding = "EUC-KR")
+)
+
+# 1) e9 파트 컬럼 자동 탐지
+e9_part_cols <- names(dt) %>% stringr::str_subset("^e9_\\d+$")
+
+major_cols <- c("e9_1", "e9_2", "e9_3", "e9_4", "e9_98")
+
+# 2) (선택) 총합(e9)과 파트합(e9_*) 일치 여부 점검용
+#    - e9이 총합이라면, 아래 diff가 거의 0이어야 정상
+check_total_consistency <- function(data) {
+  data %>%
+    transmute(
+      e9_total = e9,
+      e9_parts_sum = rowSums(across(any_of(e9_part_cols)), na.rm = TRUE),
+      diff = e9_total - e9_parts_sum
+    ) %>%
+    summarise(
+      n = n(),
+      max_abs_diff = max(abs(diff), na.rm = TRUE),
+      mean_diff = mean(diff, na.rm = TRUE)
+    )
+}
+
+print(check_total_consistency(dt))
+
+# 3) 산업구성 생성 + 집계 함수
+#    - 기본: 전국합(= 모든 시군구 합산) by (year, quarter)
+make_e9_comp <- function(data, group_vars = c("year", "quarter")) {
+  g <- rlang::syms(group_vars)
+
+  data %>%
+    group_by(!!!g) %>%
+    summarise(
+      e9 = sum(e9, na.rm = TRUE),
+      across(any_of(e9_part_cols), ~ sum(.x, na.rm = TRUE)),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      # "나머지 e9_*"를 기타로 합산 (정의 그대로)
+      기타 = rowSums(across(any_of(setdiff(e9_part_cols, major_cols))), na.rm = TRUE),
+
+      제조업 = .data$e9_1,
+      건설업 = .data$e9_2,
+      농업   = .data$e9_3,
+      임업   = .data$e9_4,
+      과거합법조치 = .data$e9_98,
+
+      # 분기 날짜(분기 시작일 기준)로 변환: x축을 깔끔하게 쓰기 위함
+      yq_date = as.Date(zoo::as.yearqtr(paste(.data$year, .data$quarter), format = "%Y %q"), frac = 0)
+    ) %>%
+    select(!!!g, yq_date, e9, 제조업, 건설업, 농업, 임업, 과거합법조치, 기타)
+}
+
+# 4) 전국 집계
+comp_nat <- make_e9_comp(dt, c("year", "quarter"))
+
+# 5) long format (plot용)
+plot_long <- comp_nat %>%
+  pivot_longer(
+    cols = c(제조업, 건설업, 농업, 임업, 과거합법조치, 기타),
+    names_to = "sector",
+    values_to = "n"
+  ) %>%
+  mutate(
+    sector = factor(sector, levels = c("제조업", "건설업", "농업", "임업", "과거합법조치", "기타"))
+  )
+
+# 6) 색상(원하는 대로 바꿔도 됨)
+pal <- c(
+  "제조업" = "#1f77b4",
+  "건설업" = "#ff7f0e",
+  "농업" = "#2ca02c",
+  "임업" = "#006400",
+  "과거합법조치" = "#9467bd",
+  "기타" = "grey70"
+)
+
+# -------------------------
+# Figure A) 산업구성 "비중" (100% stacked area)
+# -------------------------
+p_share <- ggplot(plot_long, aes(x = yq_date, y = n, fill = sector)) +
+  geom_area(position = "fill", alpha = 0.95, linewidth = 0.2, color = "white") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  scale_fill_manual(values = pal) +
+  labs(
+    x = NULL, y = "구성비(%)", fill = NULL,
+    title = "E-9 업종 구성비(분기별, 전국합)"
+  ) +
+  theme_minimal(base_family = base_family) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+# -------------------------
+# Figure B) 산업구성 "규모" (stacked area, 명)
+# -------------------------
+p_count <- ggplot(plot_long, aes(x = yq_date, y = n, fill = sector)) +
+  geom_area(alpha = 0.95, linewidth = 0.2, color = "white") +
+  scale_y_continuous(labels = comma) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  scale_fill_manual(values = pal) +
+  labs(
+    x = NULL, y = "E-9 인원(명)", fill = NULL,
+    title = "E-9 업종별 규모(분기별, 전국합)"
+  ) +
+  theme_minimal(base_family = base_family) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+# 출력
+print(p_share)
+print(p_count)
+
+# 저장 (논문용이면 pdf 추천 + png도 같이)
+ggsave("fig_e9_sector_share_nat.pdf", p_share, width = 7.0, height = 3.8)
+ggsave("fig_e9_sector_count_nat.pdf", p_count, width = 7.0, height = 3.8)
+ggsave("fig_e9_sector_share_nat.png", p_share, width = 7.0, height = 3.8, dpi = 300)
+ggsave("fig_e9_sector_count_nat.png", p_count, width = 7.0, height = 3.8, dpi = 300)
+
+# =========================================================
+# (옵션) 시도별로 보고 싶으면:
+# comp_sido <- make_e9_comp(dt, c("canon_sido_name", "year", "quarter"))
+# plot_long_sido <- comp_sido %>% pivot_longer(...)
+# + facet_wrap(~ canon_sido_name, scales="free_y") 같은 식으로 확장 가능
+# =========================================================
+
+# (옵션) 특정 시군구만 보고 싶으면:
+# dt_one <- dt %>% filter(canon_sido_name=="경상북도", canon_sigungu_name=="김천시")
+# comp_one <- make_e9_comp(dt_one, c("year","quarter"))
+# 이후 plot_long 만드는 방식 동일
+
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+e9_part_cols <- names(dt) %>% str_subset("^e9_\\d+$")
+
+diag_q <- dt %>%
+  group_by(year, quarter) %>%
+  summarise(
+    e9_total = sum(e9, na.rm = TRUE),
+    parts_total = {
+      tmp <- summarise(cur_data(), across(all_of(e9_part_cols), ~sum(.x, na.rm = TRUE)))
+      sum(as.numeric(tmp[1, ]), na.rm = TRUE)
+    },
+    .groups = "drop"
+  ) %>%
+  mutate(flag = (e9_total > 0 & parts_total == 0)) %>%
+  filter(flag)
+
+diag_q
+
+```
+
 
 ### misc.
 ```{r}
@@ -624,10 +823,15 @@ ggplot(stl_df_long, aes(x = time, y = value)) +
 # 예: 전체 합산 로그 rate
 ts_log_rate <- ts(agg_time$log_rate, frequency = 4)  # 분기 데이터라면 4
 
-par(mfrow = c(1,2))
+# ACF 저장
+png("acf_log_rate.png", width = 1600, height = 1200, res = 300)
 acf(ts_log_rate, main = "ACF of log rate")
+dev.off()
+
+# PACF 저장
+png("pacf_log_rate.png", width = 1600, height = 1200, res = 300)
 pacf(ts_log_rate, main = "PACF of log rate")
-par(mfrow = c(1,1))
+dev.off()
 
 ```
 
@@ -649,6 +853,70 @@ adf.test(ts_diff,
 plot(ts_diff, type='l')
 ```
 
+### archive
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+library(spdep)
+
+# 0) W 만들기 (한 번만)
+W_mat <- INLA:::inla.graph2matrix(G)
+
+# (중요) W_mat의 row/col 이름이 new_sigungu_cd와 매칭되도록 되어 있어야 함
+# 만약 이미 rownames(W_mat)가 코드라면 OK
+# 아니라면 여기서 rownames/colnames 세팅 필요
+
+run_moran_one_month <- function(time_id, sgg, dt_y, W_mat) {
+
+  dt_t <- dt_y %>%
+    filter(yyyymm == time_id) %>%
+    select(new_sigungu_cd, resid_pearson) %>%
+    distinct(new_sigungu_cd, .keep_all = TRUE)
+
+  sgg_resid <- sgg %>%
+    left_join(dt_t, by = "new_sigungu_cd") %>%
+    filter(!is.na(resid_pearson))
+
+  # W를 그 달에 남은 시군구에 맞게 서브셋 (정렬/길이 일치 핵심!)
+  idx <- match(sgg_resid$new_sigungu_cd, rownames(W_mat))
+  keep <- !is.na(idx)
+
+  sgg_resid <- sgg_resid[keep, ]
+  idx <- idx[keep]
+
+  W_sub <- as.matrix(W_mat)[idx, idx, drop = FALSE]
+  listw <- spdep::mat2listw(W_sub, style = "W", zero.policy = TRUE)
+
+  mi <- moran.test(
+    x = sgg_resid$resid_pearson,
+    listw = listw,
+    zero.policy = TRUE
+  )
+
+  tibble(
+    yyyymm     = time_id,
+    n          = nrow(sgg_resid),
+    moran_I    = unname(mi$estimate[["Moran I statistic"]]),
+    expectation= unname(mi$estimate[["Expectation"]]),
+    variance   = unname(mi$estimate[["Variance"]]),
+    statistic  = unname(mi$statistic),
+    p_value    = unname(mi$p.value)
+  )
+}
+
+# 1) 전체 월에 대해 실행
+time_ids <- sort(unique(dt_y$yyyymm))
+
+moran_by_month <- map_dfr(
+  time_ids,
+  ~ run_moran_one_month(.x, sgg = sgg, dt_y = dt_y, W_mat = W_mat)
+)
+
+moran_by_month
+
+```
 
 ```{r}
 # 1) rate 계산

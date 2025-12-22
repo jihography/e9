@@ -1,0 +1,1138 @@
+---
+title: "model_building"
+author: "Jiho Kwak, 2020-17530"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(showtext)
+
+# 한글 폰트 추가 (구글 Noto Sans KR)
+font_add_google("Noto Sans KR", "noto")
+showtext_auto(TRUE)
+showtext_opts(dpi = 300)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r, message=FALSE}
+library(INLA)
+library(data.table)
+library(dplyr)
+library(stringr)
+library(sf)
+library(spdep)
+library(Matrix)
+library(ggplot2)
+```
+
+```{r}
+inla.setOption(inla.mode = "experimental")
+```
+
+
+## File Import
+
+### dt_y
+```{r}
+path_y <- "dt_y_mod.csv"
+dt_y <- read.csv(
+  path_y,
+  fileEncoding = "euc-kr",   # 파일이 euc-kr로 저장됨
+  stringsAsFactors = FALSE
+)
+setDT(dt_y)
+```
+
+### subset
+```{r}
+dt_y <- dt_y %>%
+  filter(year <= 2021) %>%
+  arrange(canon_group_id, date)
+```
+
+### sgg(merged) shapefile
+```{r}
+# 1) 읽기
+sgg <- st_read("sgis_sgg_merged/SGG_merged.gpkg", quiet = TRUE)
+
+# 2) 좌표계: 라벨 없으면 set_crs, 있으면 transform (5186 고정)
+crs_now <- st_crs(sgg)
+if (is.na(crs_now)) {
+  sgg <- st_set_crs(sgg, 5186)
+} else if (is.na(crs_now$epsg) || crs_now$epsg != 5186) {
+  sgg <- st_transform(sgg, 5186)
+}
+sgg <- st_make_valid(sgg)
+
+sgg <- sgg %>%
+  mutate(new_sigungu_cd = as.character(new_sigungu_cd)) %>%
+  filter(new_sigungu_cd %in% unique(dt_q$sgg_code_sgis)) %>%
+  arrange(new_sigungu_cd) %>%
+  mutate(idx = row_number())
+```
+
+### Graph
+
+```{r}
+G <- INLA::inla.read.graph("sgg_graph.adj")
+```
+
+
+### INLA setting
+```{r}
+inla.setOption(inla.mode = "experimental")
+```
+
+### covariates list
+```{r}
+## 0) 공변량 리스트 한 번만 정의
+covariates <- c(
+  "sex_ratio_z",
+  "pop_65plus_z",
+  "trade_balance_z",
+  "mei_z",
+  # "mig_inter_sido_out_z",
+  "grdp_1st_dev_z",
+  "grdp_2nd_dev_z",
+  # "grdp_3rd_dev_z",
+  "gdp_curr_gdp_total_z",
+  # "ind_ratio_manufacturing_z",
+  "ind_ratio_construction_z",
+  "ind_ratio_wholesale_retail_z",
+  # "ind_ratio_business_z",
+  "lf_unemployment_rate_z",
+  # "lf_employment_rate_z",
+  "lf_employment_rate_15_64_z",
+  "dummy_covid",
+  "dummy_capital",
+  "dummy_si",
+  "dummy_gu",
+  "indpark_dummy",
+  "indpark_area_mgmt_z"
+)
+
+covariate_terms <- paste(covariates, collapse = " + ")
+
+## 1) 여러 formula에 공변량을 붙이는 함수
+add_covariates <- function(base_form) {
+  update(base_form, as.formula(paste(". ~ . +", covariate_terms)))
+}
+```
+
+
+```{r}
+# 필요한 패키지 로드
+library(corrplot)
+library(dplyr)
+
+# 1. 분석 대상 공변량만 추출
+# data.table인 경우: df_subset <- dt_y[, ..covariates]
+# data.frame인 경우: df_subset <- dt_y[, covariates]
+df_subset <- dt_y %>% select(all_of(covariates))
+
+# 2. 상관계수 계산 (결측치 제외)
+cor_mat <- cor(df_subset, use = "complete.obs")
+
+# 3. 시각화 (숫자와 색상으로 표현)
+# tl.cex: 텍스트 크기, tl.col: 텍스트 색상
+corrplot(cor_mat, 
+         method = "color", 
+         type = "upper", 
+         order = "hclust", 
+         addCoef.col = "black", # 상관계수 수치 표시
+         tl.col = "black", 
+         tl.srt = 45,
+         number.cex = 0.7,
+         diag = FALSE)
+```
+
+```{r}
+# 1. 임시 종속변수 생성 (VIF는 X끼리의 관계만 보므로 Y는 아무 값이나 상관없음)
+# 실제 종속변수가 있다면 그것을 써도 되지만, 공선성 체크용으로는 난수도 무방함
+# dt_y$e9 <- rnorm(nrow(dt_y))
+
+# 2. 회귀식(Formula) 만들기
+f <- as.formula(paste("e9 ~", paste(covariates, collapse = " + ")))
+
+# 3. 선형 회귀모형 적합
+vif_model <- lm(f, data = dt_y)
+
+# 4. VIF 계산
+vif_values <- car::vif(vif_model)
+
+# 5. 보기 좋게 정리 (VIF가 높은 순서대로 정렬)
+vif_df <- data.frame(
+  Variable = names(vif_values), 
+  VIF = vif_values
+)
+vif_df <- vif_df[order(vif_df$VIF, decreasing = TRUE), ]
+
+print(vif_df)
+
+fwrite(vif_df, file = "vif_dt_y.csv")
+```
+
+## summary
+```{r}
+library(data.table)
+
+# 1) _z 떼서 raw 변수명 만들기
+raw_vars <- sub("_z$", "", covariates)
+
+# 2) 실제 존재하는 컬럼만
+raw_vars <- raw_vars[raw_vars %in% names(dt_y)]
+
+# (선택) raw 변수가 없는 애들 확인
+missing_raw <- setdiff(sub("_z$", "", covariates), names(dt_y))
+if (length(missing_raw) > 0) print(missing_raw)
+
+# 3) 변수별 요약통계(안전하게 1행씩 생성)
+raw_stats_long <- rbindlist(lapply(raw_vars, function(v) {
+  x <- dt_y[[v]]
+
+  # 숫자 아니면 숫자로 변환 시도 (factor/character 대비)
+  if (!is.numeric(x)) x <- suppressWarnings(as.numeric(x))
+
+  data.table(
+    variable = v,
+    n    = sum(!is.na(x)),
+    mean = mean(x, na.rm = TRUE),
+    sd   = sd(x, na.rm = TRUE),
+    min  = min(x, na.rm = TRUE),
+    p50  = median(x, na.rm = TRUE),
+    max  = max(x, na.rm = TRUE)
+  )
+}), fill = TRUE)
+
+# 4) 정렬 + 확인
+# setorder(raw_stats_long, variable)
+raw_stats_long
+
+fwrite(raw_stats_long, file = "raw_covariates_summary_y.csv")
+```
+
+
+## Yearly
+```{r}
+dt_y <- dt_y %>%
+  filter(year <= 2021) %>%
+  arrange(canon_group_id, date)
+```
+
+### RW1_null
+
+```{r}
+# dt_y$e9_f <- dt_y$e9 + 1L
+# dt_y$E_e9 <- dt_y$population * (sum(dt_y$e9) / sum(dt_y$population))
+
+
+# fit_rw1_y <- inla(
+#   e9 ~ 1 + f(time_id_year, model = "rw1", scale.model = TRUE,
+#              hyper = list(prec = list(prior = "pc.prec", param = c(1, 0.01)))),
+#   data = dt_y,
+#   family = "poisson",
+#   E       = dt_y$total_emp,
+#   control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+#   control.predictor = list(link = 1, compute = TRUE),
+#   control.inla      = list(strategy = "simplified.laplace",
+#                            control.vb = list(emergency = 50))
+# )
+# 
+# summary(fit_rw1_y)
+# fit_rw1_y$waic$waic; fit_rw1_y$dic$dic
+```
+
+### AR1_null
+
+```{r}
+form_ar1_y <- e9 ~ 1 +
+  f(time_id_year, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))     # AR(1) 상관 PC prior
+    )
+  )
+
+fit_ar1_y <- inla(
+  formula = form_ar1_y,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$total_emp,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+summary(fit_ar1_y)
+fit_ar1_y$waic$waic; fit_ar1_y$dic$dic
+```
+
+### AR1_cov
+
+```{r}
+# 3) 공변량 추가한 공식
+form_ar1cov_y <- add_covariates(form_ar1_y)
+
+# 4) 적합 (E= 방식; offset 쓰지 않음)
+fit_ar1cov_y <- inla(
+  formula = form_ar1cov_y,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$total_emp,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+
+summary(fit_ar1cov_y)
+fit_ar1cov_y$waic$waic; fit_ar1cov_y$dic$dic
+```
+
+### BYM2 + AR
+
+```{r}
+# BYM2: 공간, 그래프=G
+# AR(1): 시간
+form_bym2_ar1 <- e9 ~ 1 +
+  f(space_id, model="bym2", graph=G,
+    scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),     # precision PC prior
+      phi  = list(prior="pc", param=c(0.5, 0.5))          # mixing parameter prior
+    )
+  ) +
+  f(time_id_year, model="ar1",
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))     # AR(1) 상관 PC prior
+    )
+  )
+
+fit_bym2_ar1 <- inla(
+  formula = form_bym2_ar1,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$total_emp2,
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(
+    strategy   = "adaptive",     # <- simplified.laplace 대신
+    diagonal   = 1e-5,           # <- 수치적 안정화(정규화)
+    control.vb = list(emergency=200)
+  ),
+  control.mode = list(restart=TRUE),  # 초기값 재시작
+  verbose = TRUE
+)
+
+summary(fit_bym2_ar1)
+fit_bym2_ar1$waic$waic; fit_bym2_ar1$dic$dic
+
+```
+
+### BYM2 \* AR (time-varying spatial random effects)
+
+```{r}
+# 공간 ID를 시간별로 복제한 인덱스(상호작용용)
+# dt_y <- dt_y %>% arrange(time_id_year, space_id)
+# dt_y$space_id_st <- dt_y$space_id          # 동일 값이지만 group=time_id_year로 복제될 것
+
+form_interaction_y <- e9 ~ 1 +
+  # 메인 공간효과(선택): 때로는 제거하고 상호작용만 두기도 함
+  f(space_id, model="bym2", graph=G, scale.model=TRUE,
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )) +
+  # 메인 시간효과
+  f(time_id_year, model="ar1",
+    hyper = list(
+      theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+      rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+    )) +
+  # 공간×시간 상호작용: BYM2를 시간별 복제, 시간 간 AR(1)로 연결
+  f(space_id_st, model="bym2", graph=G, scale.model=TRUE,
+    group = time_id_year,
+    control.group = list(model="ar1",
+                         hyper = list(
+                           theta1 = list(prior="pc.prec", param=c(1, 0.01)),
+                           rho  = list(prior="pc.cor1", param=c(0.7, 0.5))
+                         )),
+    hyper = list(
+      prec = list(prior="pc.prec", param=c(1, 0.01)),
+      phi  = list(prior="pc", param=c(0.5, 0.5))
+    )
+  )
+
+fit_interaction_y <- inla(
+  formula = form_interaction_y,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$total_emp,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           control.vb=list(emergency=50))
+)
+
+summary(fit_interaction_y)
+fit_interaction_y$waic$waic; fit_interaction_y$dic$dic
+
+```
+
+
+### BYM2 \* AR + cov
+
+```{r}
+# 3) 공변량 추가한 공식
+form_cov_y <- add_covariates(form_interaction_y)
+
+# 4) 적합 (E= 방식; offset 쓰지 않음)
+fit_cov_y <- inla(
+  formula = form_cov_y,
+  data    = dt_y,
+  family  = "poisson",
+  E       = dt_y$total_emp,   # ★ 인구를 기대노출로
+  control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+  control.predictor = list(link=1, compute=TRUE),
+  control.inla      = list(strategy="simplified.laplace",
+                           int.strategy = "auto",
+                           control.vb=list(emergency=50)),
+  verbose = TRUE
+)
+
+summary(fit_cov_y)
+fit_cov_y$waic$waic; fit_cov_y$dic$dic
+```
+
+
+### Model Comparison
+
+```{r}
+## 0) INLA fit 객체들 한 번에 모으기
+fits_y <- list(
+  baseline_ar1   = fit_ar1_y,
+  ar1_cov        = fit_ar1cov_y,
+  bym2_ar1       = fit_bym2_ar1,
+  interaction    = fit_interaction_y,
+  bym2_ar1_cov   = fit_cov_y
+)
+
+## 1) WAIC, DIC 뽑아서 data.frame으로 만드는 헬퍼
+extract_criteria <- function(fit_list) {
+  data.frame(
+    model = names(fit_list),
+    WAIC  = sapply(fit_list, function(x) x$waic$waic),
+    DIC   = sapply(fit_list, function(x) x$dic$dic),
+    row.names = NULL
+  )
+}
+
+## 사용
+crit_y <- extract_criteria(fits_y)
+crit_y
+write.csv(crit_y, "comparison_y.csv", row.names = FALSE, fileEncoding = "euc-kr")
+```
+
+### PIT
+
+```{r}
+library(ggplot2)
+
+pit <- fit_cov_y$cpo$pit
+ok  <- is.finite(pit) & !is.na(pit)
+
+df_pit <- data.frame(
+  pit = pit[ok]
+)
+
+pit <- ggplot(df_pit, aes(x = pit)) +
+  geom_histogram(bins = 20) +
+  geom_hline(yintercept = nrow(df_pit)/20, linetype = 2) +
+  labs(title = "PIT histogram", x = "PIT", y = "Count") +
+  theme_minimal()
+
+pit
+ggsave("pit.png", width=10, pit, dpi=300)
+```
+```{r}
+pit <- fit_cov_y$cpo$pit
+pit <- pit[is.finite(pit) & !is.na(pit)]
+
+c(mean = mean(pit), var = var(pit), unif_var = 1/12)
+```
+
+## save results
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tibble)
+  library(ggplot2)
+  library(stringr)
+  library(forcats)
+  library(readr)
+  library(sf)
+  library(spdep)
+  library(Matrix)
+  library(INLA)
+  library(rlang)
+  library(tidyr)
+  library(purrr)
+  library(scales)
+})
+
+# ----------------------------
+# 0) 출력 폴더
+# ----------------------------
+out_dir <- "outputs/inla_results_y_e9"
+fig_dir <- file.path(out_dir, "_fig")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+saveRDS(fit_cov_y, file.path(out_dir, "fit_cov_y.rds"))
+
+# ----------------------------
+# 1) 지도 함수 (단일 시점)
+#    - midpoint 주면 gradient2 사용 (잔차/로그효과용)
+# ----------------------------
+plot_sgg_var <- function(dt,
+                         sgg,
+                         var,
+                         time_value = NULL,
+                         low  = "grey95",
+                         high = "steelblue",
+                         midpoint = NULL,
+                         fill_label = NULL,
+                         base_size = 14,
+                         width = 6, height = 5, dpi = 300,
+                         fig_dir = "_fig") {
+
+  var_yuo <- rlang::enquo(var)
+
+  if (is.null(time_value)) {
+    time_value <- dt %>% summarise(last = max(yyyymm, na.rm = TRUE)) %>% pull(last)
+  }
+
+  dt_time <- dt %>% dplyr::filter(yyyymm == time_value)
+
+  sgg_map <- sgg %>%
+    dplyr::left_join(dt_time, by = c("idx" = "space_id"))
+
+  if (is.null(fill_label)) fill_label <- rlang::as_name(var_yuo)
+
+  p <- ggplot(sgg_map) +
+    geom_sf(aes(fill = !!var_yuo), color = "grey70", linewidth = 0.1) +
+    labs(
+      title = paste0(fill_label, " (yyyymm = ", time_value, ")"),
+      fill  = fill_label
+    ) +
+    theme_minimal(base_size = base_size) +
+    theme(
+      plot.title   = element_text(face = "bold", hjust = 0.5),
+      legend.title = element_text(face = "bold")
+    )
+
+  if (is.null(midpoint)) {
+    p <- p + scale_fill_gradient(low = low, high = high)
+  } else {
+    p <- p + scale_fill_gradient2(low = low, high = high, midpoint = midpoint)
+  }
+
+  file_stem <- paste0(fill_label, "_", time_value)
+  file_stem_safe <- gsub("[^[:alnum:]가-힣]+", "_", file_stem)
+  file_name <- file.path(fig_dir, paste0(file_stem_safe, ".png"))
+
+  ggsave(filename = file_name, plot = p, width = width, height = height, dpi = dpi)
+  message("Saved plot to: ", file_name)
+  p
+}
+
+# ----------------------------
+# 2) Sanity checks
+# ----------------------------
+stopifnot(is.numeric(dt_y$yyyymm))
+stopifnot(all(dt_y$total_emp > 0, na.rm = TRUE))
+stopifnot(nrow(dt_y) == nrow(fit_cov_y$summary.fitted.values))
+
+stopifnot(all(c("space_id","time_id_year","yyyymm","total_emp") %in% names(dt_y)))
+stopifnot("idx" %in% names(sgg))
+
+# time_id_year <-> yyyymm
+time_map <- dt_y %>% distinct(time_id_year, yyyymm) %>% arrange(time_id_year)
+dup_time <- time_map %>% count(time_id_year) %>% filter(n > 1)
+if (nrow(dup_time) > 0) warning("time_id_year가 yyyymm에 1:1로 매핑되지 않습니다. time_map 확인 필요")
+
+# 공간 인덱스 정합 체크(강하게)
+N_map <- nrow(sgg)
+if (max(dt_y$space_id, na.rm=TRUE) != N_map) {
+  warning("space_id 최대값(", max(dt_y$space_id, na.rm=TRUE), ") != nrow(sgg)(", N_map, "). ",
+          "sgg$idx == space_id 정합을 확인하세요.")
+}
+
+# ----------------------------
+# 3) 고정효과 저장 (IRR)
+# ----------------------------
+fixed_df <- fit_cov_y$summary.fixed %>%
+  as.data.frame() %>%
+  rownames_to_column("term") %>%
+  as_tibble() %>%
+  mutate(
+    irr_mean = exp(mean),
+    irr_lo   = exp(`0.025quant`),
+    irr_hi   = exp(`0.975quant`)
+  ) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    sig_95 = if_else(irr_lo > 1 | irr_hi < 1, "95% CrI excludes 1", "Includes 1"),
+    term   = fct_reorder(term, irr_mean)
+  )
+
+write_csv(fixed_df, file.path(out_dir, "fixed_effects.csv"))
+
+p_fix <- ggplot(fixed_df, aes(x = irr_mean, y = term)) +
+  geom_vline(xintercept = 1, linetype = "dashed", linewidth = 0.7) +
+  geom_errorbarh(aes(xmin = irr_lo, xmax = irr_hi, color = sig_95),
+                 height = 0.25, linewidth = 1.0) +
+  geom_point(aes(color = sig_95, shape = sig_95), size = 4) +
+  labs(x="IRR = exp(beta)", y=NULL, color=NULL, shape=NULL,
+       title="Fixed effects (IRR, 95% CrI)") +
+  theme_bw(base_size = 26) +
+  theme(
+    plot.title = element_text(size=30, face="bold", hjust=0.5),
+    axis.title.x = element_text(size=26, margin=margin(t=10)),
+    axis.text.x  = element_text(size=20),
+    axis.text.y  = element_text(size=22),
+    legend.text  = element_text(size=20),
+    legend.position="bottom",
+    panel.grid.minor=element_blank()
+  )
+
+ggsave(file.path(fig_dir, "fixed_effects_forest.png"), p_fix, width=10, height=9, dpi=300)
+
+# ----------------------------
+# 4) 하이퍼파라미터 저장
+# ----------------------------
+if (!is.null(fit_cov_y$summary.hyperpar)) {
+  hyper_df <- fit_cov_y$summary.hyperpar %>%
+    as.data.frame() %>%
+    rownames_to_column("hyper") %>%
+    as_tibble()
+  write_csv(hyper_df, file.path(out_dir, "hyperparameters.csv"))
+}
+
+# ----------------------------
+# 5) 랜덤효과 저장 helpers
+# ----------------------------
+extract_random <- function(fit, re_name) {
+  df <- fit$summary.random[[re_name]]
+  if (is.null(df)) return(NULL)
+  df <- as.data.frame(df) %>% as_tibble()
+  if (!("ID" %in% names(df))) names(df)[1] <- "ID"
+  df %>% mutate(
+    effect = re_name,
+    mult_mean = exp(mean),
+    mult_lo   = exp(`0.025quant`),
+    mult_hi   = exp(`0.975quant`)
+  )
+}
+
+re_space <- extract_random(fit_cov_y, "space_id")
+re_time  <- extract_random(fit_cov_y, "time_id_year")
+re_st    <- extract_random(fit_cov_y, "space_id_st")
+
+if (!is.null(re_space)) write_csv(re_space, file.path(out_dir, "random_space_id.csv"))
+if (!is.null(re_time))  write_csv(re_time,  file.path(out_dir, "random_time_id_year.csv"))
+if (!is.null(re_st))    write_csv(re_st,    file.path(out_dir, "random_space_id_st_raw.csv"))
+
+# time effect + yyyymm
+if (!is.null(re_time)) {
+  re_time2 <- re_time %>%
+    mutate(time_id_year = as.integer(ID)) %>%
+    left_join(time_map, by="time_id_year") %>%
+    arrange(time_id_year)
+  write_csv(re_time2, file.path(out_dir, "random_time_id_year_with_yyyymm.csv"))
+
+  p_time <- ggplot(re_time2, aes(x=yyyymm, y=mult_mean)) +
+    geom_ribbon(aes(ymin=mult_lo, ymax=mult_hi), alpha=0.2) +
+    geom_line() + geom_point(size=1) +
+    labs(x=NULL, y="exp(eta_t) (multiplier)", title="Common time trend (AR1)") +
+    theme_bw()
+  ggsave(file.path(fig_dir, "random_time_trend.png"), p_time, width=7, height=4, dpi=300)
+}
+
+# ----------------------------
+# 6) 예측치 저장 (너 결과 기준: fitted.values = rate/lambda)
+#    - lambda = fitted.values
+#    - mu     = E * lambda
+#    + 잔차 (Poisson 기준)
+# ----------------------------
+
+fv <- fit_cov_y$summary.fitted.values
+
+# ★ fit 직전과 같은 정렬로 맞춤 (매우 중요)
+dt_y_fit <- dt_y %>% arrange(time_id_year, space_id)
+stopifnot(nrow(dt_y_fit) == nrow(fv))
+
+dt_pred <- dt_y_fit %>%
+  mutate(
+    # 1) rate (lambda / IR / relative risk)
+    ir_hat = fv$mean,
+    ir_lo  = fv$`0.025quant`,
+    ir_hi  = fv$`0.975quant`,
+    ir_width = ir_hi - ir_lo,
+
+    # 2) expected count (mu) = E * rate
+    mu_mean = total_emp * ir_hat,
+    mu_lo   = total_emp * ir_lo,
+    mu_hi   = total_emp * ir_hi
+  )
+
+# ---- 잔차 (Poisson) ----
+eps <- 1e-12
+y  <- dt_pred$e9
+mu <- pmax(dt_pred$mu_mean, eps)
+
+dt_pred <- dt_pred %>%
+  mutate(
+    resid_pearson = (y - mu) / sqrt(mu),
+    resid_dev = {
+      y0 <- pmax(y, 0)
+      term <- ifelse(y0 == 0, 0, y0 * log((y0 + eps) / mu))
+      sign(y0 - mu) * sqrt(pmax(2 * (term - (y0 - mu)), 0))
+    }
+  )
+
+# ★ sanity check: 이제 y/mu ~ 1 근처가 나와야 정상
+print(summary(dt_pred$e9 / pmax(dt_pred$mu_mean, 1e-12)))
+print(cor(dt_pred$e9, dt_pred$mu_mean, use="complete.obs"))
+
+# ----------------------------
+# 6-1) u_it 복원: space_id_st가 (2*NT)로 나온 BYM2 블록 케이스 처리
+#   - group 컬럼이 있으면 그걸로 조인
+#   - group 없고 nrow(re_st)==2*(N*T)이면 structured/iid 결합해서 u_log_mean 생성
+# ----------------------------
+re_st2 <- NULL
+
+if (!is.null(re_st)) {
+  N <- dplyr::n_distinct(dt_y$space_id)
+  T <- dplyr::n_distinct(dt_y$time_id_year)
+  NT <- N * T
+
+  if ("group" %in% names(re_st)) {
+    re_st2 <- re_st %>%
+      mutate(space_id = as.integer(ID),
+             time_id_year  = as.integer(group)) %>%
+      left_join(time_map, by="time_id_year") %>%
+      transmute(space_id, time_id_year, yyyymm,
+                u_log = mean,
+                u_mult = exp(mean),
+                u_lo = exp(`0.025quant`),
+                u_hi = exp(`0.975quant`))
+  } else {
+    # group이 없는 케이스: BYM2가 2블록으로 붙어나온 경우가 흔함
+    if (nrow(re_st) == 2 * NT) {
+      hp <- fit_cov_y$summary.hyperpar
+      pick_hp <- function(pattern, col="0.5quant") {
+        rn <- rownames(hp)
+        i <- grep(pattern, rn, ignore.case=TRUE)
+        if (length(i)==0) stop("hyperpar에서 ", pattern, " 찾지 못함")
+        as.numeric(hp[i[1], col])
+      }
+
+      prec_st <- pick_hp("^Precision for space_id_st", "0.5quant")
+      phi_st  <- pick_hp("^Phi for space_id_st", "0.5quant")
+
+      u_struct <- re_st$mean[1:NT]
+      u_iid    <- re_st$mean[(NT+1):(2*NT)]
+
+      # BYM2 결합(근사; mean만 복원)
+      u_log_mean <- (sqrt(phi_st) * u_struct + sqrt(1 - phi_st) * u_iid) / sqrt(prec_st)
+
+      grid_st <- tidyr::expand_grid(
+        time_id_year  = sort(unique(dt_y$time_id_year)),
+        space_id = sort(unique(dt_y$space_id))
+      ) %>%
+        arrange(time_id_year, space_id) %>%
+        mutate(
+          u_log  = u_log_mean,
+          u_mult = exp(u_log)
+        ) %>%
+        left_join(time_map, by="time_id_year") %>%
+        select(space_id, time_id_year, yyyymm, u_log, u_mult)
+
+      re_st2 <- grid_st
+    } else {
+      message("space_id_st에 group 없음 & nrow가 2*NT도 아님 -> u_it 복원 스킵. ",
+              "(nrow(re_st)=", nrow(re_st), ", NT=", NT, ")")
+    }
+  }
+}
+
+if (!is.null(re_st2)) {
+  write_csv(re_st2, file.path(out_dir, "random_space_time_u_it_with_yyyymm.csv"))
+  dt_pred <- dt_pred %>%
+    left_join(re_st2, by=c("space_id","time_id_year","yyyymm"))
+}
+
+write.csv(dt_pred, file.path(out_dir, "dt_pred_with_mu_ir_resid_random_effects.csv"), fileEncoding = "euc-kr")
+
+# ----------------------------
+# 7) G 기반 nb/listw 만들기 (Moran용)
+# ----------------------------
+make_nb_from_inla_graph <- function(G) {
+  W <- INLA:::inla.graph2matrix(G)
+  W <- (W + Matrix::t(W)) > 0
+  diag(W) <- 0
+  W <- Matrix::Matrix(W * 1, sparse = TRUE)
+
+  nb <- spdep::mat2listw(as.matrix(W), style="B", zero.policy=TRUE)$neighbours
+  nb <- spdep::make.sym.nb(nb)
+  nb
+}
+
+nb_G <- make_nb_from_inla_graph(G)
+
+# ----------------------------
+# 8) 분기별 Moran's I (subset.listw 안 씀: subset.nb로 해결)
+# ----------------------------
+moran_by_time_nb <- function(dt_pred,
+                             nb,
+                             times = NULL,
+                             var_col = "resid_pearson",
+                             space_col = "space_id",
+                             time_col  = "yyyymm",
+                             style = "W",
+                             zero.policy = TRUE,
+                             method = c("analytic","mc"),
+                             nsim = 999) {
+
+  method <- match.arg(method)
+  stopifnot(var_col %in% names(dt_pred))
+  N <- length(nb)
+
+  if (is.null(times)) times <- sort(unique(dt_pred[[time_col]]))
+  times <- sort(unique(times))
+
+  moran_one <- function(tv) {
+    tmp <- dt_pred %>%
+      filter(.data[[time_col]] == tv) %>%
+      select(space_id = all_of(space_col), x = all_of(var_col)) %>%
+      distinct(space_id, .keep_all = TRUE)
+
+    if (any(tmp$space_id < 1 | tmp$space_id > N, na.rm=TRUE)) {
+      stop("space_id가 nb 노드 범위(1..N) 밖입니다. 정합 확인 필요.")
+    }
+
+    x_full <- rep(NA_real_, N)
+    x_full[tmp$space_id] <- tmp$x
+
+    valid <- !is.na(x_full)
+    n_valid <- sum(valid)
+
+    if (n_valid < 3) {
+      return(tibble(yyyymm=tv, n=n_valid, I=NA_real_, z=NA_real_, p=NA_real_))
+    }
+
+    nb_sub <- spdep::subset.nb(nb, subset = valid)
+    lw_sub <- spdep::nb2listw(nb_sub, style=style, zero.policy=zero.policy)
+    x_sub  <- x_full[valid]
+
+    if (method == "analytic") {
+      mt <- spdep::moran.test(x_sub, lw_sub, zero.policy=zero.policy)
+      tibble(
+        yyyymm = tv,
+        n      = n_valid,
+        I      = unname(mt$estimate[["Moran I statistic"]]),
+        z      = unname(mt$statistic),
+        p      = unname(mt$p.value)
+      )
+    } else {
+      mc <- spdep::moran.mc(x_sub, lw_sub, nsim=nsim, zero.policy=zero.policy)
+      tibble(
+        yyyymm = tv,
+        n      = n_valid,
+        I      = unname(mc$statistic),
+        z      = NA_real_,
+        p      = unname(mc$p.value)
+      )
+    }
+  }
+
+  bind_rows(lapply(times, moran_one)) %>% arrange(yyyymm)
+}
+
+moran_res <- moran_by_time_nb(
+  dt_pred = dt_pred,
+  nb      = nb_G,
+  times   = sort(unique(dt_pred$yyyymm)),
+  var_col = "resid_pearson",
+  style   = "W",
+  method  = "analytic"
+)
+
+write_csv(moran_res, file.path(out_dir, "moran_resid_pearson_by_time.csv"))
+
+p_moran <- ggplot(moran_res, aes(x=yyyymm, y=I)) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_line() +
+  geom_point(aes(shape = p < 0.05), size=2.5) +
+  labs(title="Moran's I of Pearson residuals by time", x=NULL, y="Moran's I", shape="p < 0.05") +
+  theme_bw()
+
+ggsave(file.path(fig_dir, "moran_resid_pearson_by_time.png"), p_moran, width=8, height=4, dpi=300)
+
+# ----------------------------
+# 9) u_it 여러 시점 1x3 슬라이스 (facet)
+# ----------------------------
+plot_u_it_slices <- function(dt_pred, sgg,
+                             times,
+                             var = c("u_log","u_mult"),
+                             nrow = 1, ncol = 3,
+                             quant_clip = 0.02,
+                             base_size = 13,
+                             save_path = NULL,
+                             width = 15, height = 5, dpi = 300) {
+
+  var <- match.arg(var)
+  stopifnot(var %in% names(dt_pred))
+  stopifnot(all(c("space_id","yyyymm") %in% names(dt_pred)))
+  stopifnot("idx" %in% names(sgg))
+
+  times <- sort(unique(times))
+  times <- times[seq_len(min(length(times), nrow*ncol))]
+
+  sl <- dt_pred %>%
+    filter(yyyymm %in% times) %>%
+    select(space_id, yyyymm, value = all_of(var)) %>%
+    mutate(yyyymm = factor(yyyymm, levels = times)) %>%
+    distinct(space_id, yyyymm, .keep_all = TRUE)
+
+  sgg_map <- sgg %>% left_join(sl, by=c("idx"="space_id"))
+
+  vv <- sgg_map$value
+  vv <- vv[is.finite(vv)]
+  if (length(vv)==0) stop("u_it 붙었는지 확인.")
+
+  lo <- as.numeric(quantile(vv, probs=quant_clip, na.rm=TRUE))
+  hi <- as.numeric(quantile(vv, probs=1-quant_clip, na.rm=TRUE))
+  mid <- if (var=="u_log") 0 else 1
+
+  p <- ggplot(sgg_map) +
+    geom_sf(aes(fill=value), color="grey70", linewidth=0.1) +
+    facet_wrap(~ yyyymm, nrow=nrow, ncol=ncol) +
+    scale_fill_gradient2(midpoint=mid, limits=c(lo,hi), oob=scales::squish) +
+    labs(
+      title = if (var=="u_log") "u_it (log-scale)" else "exp(u_it) (multiplier)",
+      fill = var
+    ) +
+    theme_minimal(base_size=base_size) +
+    theme(plot.title=element_text(face="bold", hjust=0.5),
+          strip.text=element_text(face="bold"),
+          legend.title=element_text(face="bold"))
+
+  if (!is.null(save_path)) {
+    ggsave(save_path, p, width=width, height=height, dpi=dpi)
+    message("Saved: ", save_path)
+  }
+  p
+}
+
+# ----------------------------
+# 10) 지도 출력 (마지막 시점 + 잔차 + (있으면) u_it)
+# ----------------------------
+target_times <- sort(unique(dt_pred$yyyymm))
+target_times <- tail(target_times, 1)
+
+for (tv in target_times) {
+  plot_sgg_var(dt_pred, sgg, ir_hat,  tv, fill_label="Predicted IR",
+               low="grey95", high="steelblue", fig_dir=fig_dir)
+
+  plot_sgg_var(dt_pred, sgg, mu_mean, tv, fill_label="Predicted Count (mu)",
+               low="grey95", high="steelblue", fig_dir=fig_dir)
+
+  plot_sgg_var(dt_pred, sgg, ir_width, tv, fill_label="IR 95% CrI width",
+               low="grey95", high="steelblue", fig_dir=fig_dir)
+
+  plot_sgg_var(dt_pred, sgg, resid_pearson, tv, fill_label="Pearson residual",
+               low="grey95", high="steelblue", midpoint=0, fig_dir=fig_dir)
+
+  plot_sgg_var(dt_pred, sgg, resid_dev, tv, fill_label="Deviance residual",
+               low="grey95", high="steelblue", midpoint=0, fig_dir=fig_dir)
+
+  if ("s_mult" %in% names(dt_pred)) {
+    plot_sgg_var(dt_pred, sgg, s_mult, tv, fill_label="Spatial main effect exp(s_i)",
+                 low="grey95", high="steelblue", fig_dir=fig_dir)
+  }
+
+  if ("u_log" %in% names(dt_pred)) {
+    plot_sgg_var(dt_pred, sgg, u_log, tv, fill_label="Space-time interaction u_it (log)",
+                 low="grey95", high="steelblue", midpoint=0, fig_dir=fig_dir)
+  }
+}
+
+# u_it 1x3 슬라이스 
+if ("u_mult" %in% names(dt_pred)) {
+  times3 <- tail(sort(unique(dt_pred$yyyymm)), 3)
+  p_u3 <- plot_u_it_slices(
+    dt_pred, sgg, times=times3, var="u_mult", nrow=1, ncol=3,
+    save_path = file.path(fig_dir, paste0("u_it_slices_1x3_u_mult_", paste(times3, collapse="_"), ".png")),
+    width=15, height=5, dpi=300
+  )
+  print(p_u3)
+}
+
+message("All outputs saved under: ", normalizePath(out_dir))
+
+
+```
+
+```{r}
+# fv$mean
+```
+
+## Others
+### SVC_yearly
+```{r}
+# # (1) 공간 SVC용 인덱스
+# dt_y$space_id_svc_1 <- dt_y$space_id
+# dt_y$space_id_svc_2 <- dt_y$space_id
+# 
+# # (추가) 1st_dev / 2nd_dev 모두 SVC용 centered covariate 생성
+# dt_y$x_1st_svc <- scale(dt_y$grdp_1st_dev, center = TRUE, scale = FALSE)
+# dt_y$x_2nd_svc <- scale(dt_y$grdp_2nd_dev, center = TRUE, scale = FALSE)
+# 
+# # # (2) 시공간 SVC를 쓰려면 (선택)
+# # dt_y$space_id_svc_st <- dt_y$space_id_st
+# # dt_y$x_manu_svc_st   <- dt_y$ind_ratio_manufacturing
+# 
+# 
+# # (추가) 1st_dev / 2nd_dev 모두 포함한 SVC 모형
+# form_svc_y <- update(
+#   form_cov_y,
+#   . ~ . +
+#     # 1차 산업 비중 SVC
+#     f(space_id_svc_1, x_1st_svc,
+#       model = "bym2", graph = G, scale.model = TRUE,
+#       hyper = list(
+#         prec = list(prior = "pc.prec", param = c(1, 0.01)),
+#         phi  = list(prior = "pc",      param = c(0.5, 0.5))
+#       )) +
+#     # 2차 산업 비중 SVC
+#     f(space_id_svc_2, x_2nd_svc,
+#       model = "bym2", graph = G, scale.model = TRUE,
+#       hyper = list(
+#         prec = list(prior = "pc.prec", param = c(1, 0.01)),
+#         phi  = list(prior = "pc",      param = c(0.5, 0.5))
+#       ))
+# )
+# 
+# fit_svc_y <- inla(
+#   formula = form_svc_y,
+#   data    = dt_y,
+#   family  = "poisson",
+#   E       = dt_y$lf_econ_active_thousand,
+#   control.compute   = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+#   control.predictor = list(link = 1, compute = TRUE),
+#   control.inla      = list(
+#     strategy     = "simplified.laplace",
+#     int.strategy = "auto",
+#     control.vb   = list(emergency = 50)
+#   ),
+#   verbose = TRUE
+# )
+# 
+# summary(fit_svc_y)
+# 
+# 
+# library(dplyr)
+# 
+# # (추가) 1차 산업 비중: 공통 기울기(고정효과) + SVC(랜덤 편차) → 지역별 기울기/IRR
+# beta_1st <- fit_svc_y$summary.fixed["grdp_1st_dev", "mean"]
+# svc1_raw <- as.data.frame(fit_svc_y$summary.random$space_id_svc_1)
+# 
+# svc1_coef <- svc1_raw[1:max(dt_y$space_id_svc_1), ] %>%
+#   select(ID, mean, sd, `0.025quant`, `0.975quant`) %>%
+#   rename(
+#     space_id = ID,
+#     b1_mean  = mean,
+#     b1_sd    = sd,
+#     b1_lcl   = `0.025quant`,
+#     b1_ucl   = `0.975quant`
+#   ) %>%
+#   mutate(
+#     beta1_i     = beta_1st + b1_mean,
+#     beta1_i_lcl = beta_1st + b1_lcl,
+#     beta1_i_ucl = beta_1st + b1_ucl,
+#     irr1        = exp(beta1_i),
+#     irr1_lcl    = exp(beta1_i_lcl),
+#     irr1_ucl    = exp(beta1_i_ucl)
+#   )
+# 
+# # 2차 산업 비중: 공통 기울기(고정효과) + SVC(랜덤 편차) → 지역별 기울기/IRR
+# beta_2nd <- fit_svc_y$summary.fixed["grdp_2nd_dev", "mean"]
+# svc2_raw <- as.data.frame(fit_svc_y$summary.random$space_id_svc_2)
+# 
+# svc2_coef <- svc2_raw[1:max(dt_y$space_id_svc_2), ] %>%
+#   select(ID, mean, sd, `0.025quant`, `0.975quant`) %>%
+#   rename(
+#     space_id = ID,
+#     b2_mean  = mean,
+#     b2_sd    = sd,
+#     b2_lcl   = `0.025quant`,
+#     b2_ucl   = `0.975quant`
+#   ) %>%
+#   mutate(
+#     beta2_i     = beta_2nd + b2_mean,
+#     beta2_i_lcl = beta_2nd + b2_lcl,
+#     beta2_i_ucl = beta_2nd + b2_ucl,
+#     irr2        = exp(beta2_i),
+#     irr2_lcl    = exp(beta2_i_lcl),
+#     irr2_ucl    = exp(beta2_i_ucl)
+#   )
+# 
+# # (권장) 하나로 합치기 (지도 join/후처리 편함)
+# svc_coef_all <- svc1_coef %>%
+#   full_join(svc2_coef, by = "space_id")
+# 
+# 
+# library(sf)
+# 
+# sgg_slope <- sgg %>%
+#   left_join(svc_coef_all, by = c("idx" = "space_id"))
+# 
+# # 잘 붙었는지 확인
+# sgg_slope %>%
+#   st_drop_geometry() %>%
+#   select(idx, new_sigungu_nm, beta1_i, irr1, beta2_i, irr2) %>%
+#   head()
+# 
+# 
+# # --- (추가) dpi=300으로 저장 (ggplot 객체를 변수로 저장해서 ggsave) ---
+# 
+# library(ggplot2)
+# 
+# # 1차 산업 비중 SVC 지도
+# p_1st <- ggplot(sgg_slope) +
+#   geom_sf(aes(fill = beta1_i), color = NA) +
+#   scale_fill_gradient2(midpoint = 0, low = "blue", mid = "white", high = "red") +
+#   theme_minimal() +
+#   labs(title = "전국대비 1차산업 비중 기울기 (SVC)", fill = "β1_i")
+# 
+# # 2차 산업 비중 SVC 지도
+# p_2nd <- ggplot(sgg_slope) +
+#   geom_sf(aes(fill = beta2_i), color = NA) +
+#   scale_fill_gradient2(midpoint = 0, low = "blue", mid = "white", high = "red") +
+#   theme_minimal() +
+#   labs(title = "전국대비 2차산업 비중 기울기 (SVC)", fill = "β2_i")
+# 
+# # 저장 (권장: 가로 긴 지도면 width 키우기)
+# ggsave("svc_slope_1st.png", plot = p_1st, dpi = 300, width = 10, height = 7, units = "in")
+# ggsave("svc_slope_2nd.png", plot = p_2nd, dpi = 300, width = 10, height = 7, units = "in")
+
+```
